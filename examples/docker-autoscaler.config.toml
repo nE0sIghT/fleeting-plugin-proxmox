@@ -1,0 +1,55 @@
+concurrent = 20
+check_interval = 3
+
+[[runners]]
+  name = "proxmox-docker-autoscaler"
+  url = "https://gitlab.example.com"
+  token = "RUNNER_TOKEN"
+  executor = "docker-autoscaler"
+
+  [runners.docker]
+    image = "alpine:3.20"
+    privileged = false
+    tls_verify = false
+    disable_cache = false
+    volumes = ["/cache"]
+    shm_size = 0
+
+  [runners.autoscaler]
+    plugin = "/usr/local/bin/fleeting-plugin-proxmox"
+    capacity_per_instance = 1
+    max_use_count = 1
+    max_instances = 20
+    instance_ready_command = "cloud-init status --wait || test $? -eq 2"
+
+  [runners.autoscaler.plugin_config]
+    api_url = "https://pve.example.com:8006"
+    token_id = "gitlab-runner@pve!fleeting"
+    token_secret = "REDACTED"
+    tls_ca_file = "/etc/gitlab-runner/proxmox-ca.pem"
+    cluster_name = "prod-pve"
+    pool = "gitlab-ci"
+    template_vmid = 9000
+    name_prefix = "glr-docker"
+    vmid_range = "501000-501999"
+    nodes = ["pve01", "pve02"]
+
+    scheduler = "balanced"
+    clone_mode = "linked"
+    target_storages = ["ceph-vm", "local-lvm"]
+    network_mode = "dhcp"
+    cloud_init_enabled = true
+    cloud_init_interface = "ipconfig0"
+    ci_user = "ubuntu"
+    ci_ssh_keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBExampleRunnerKey gitlab-runner@example"
+    ]
+
+  [runners.autoscaler.connector_config]
+    os = "linux"
+    protocol = "ssh"
+    protocol_port = 22
+    username = "ubuntu"
+    keepalive = "30s"
+    timeout = "5m"
+    use_external_addr = false
