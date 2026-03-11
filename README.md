@@ -89,7 +89,7 @@ Recommended plugin configuration:
 - `clone_mode`  
   `auto`, `linked`, or `full`. Default: `auto`.
 - `target_storages`  
-  Optional datastore allowlist. Accepts a string or list. Supported only with `clone_mode = "full"`, because Proxmox does not allow selecting `storage` for linked clones. The plugin chooses the most free matching datastore per node and uses that datastore's free space for disk placement checks. A datastore is considered usable on a node only when both conditions hold: Proxmox storage config allows that node in the storage `Nodes` setting, and storage capacity is reported for that storage on that node.
+  Optional datastore allowlist. Accepts a string or list. The plugin chooses the most free matching datastore per node and uses that datastore's free space for disk placement checks. A datastore is considered usable on a node only when both conditions hold: Proxmox storage config allows that node in the storage `Nodes` setting, and storage capacity is reported for that storage on that node. With `clone_mode = "auto"`, the plugin still uses linked clones when the template is already local to the selected node and the selected datastore matches the template datastore; otherwise it falls back to full clone. With explicit `clone_mode = "linked"`, every configured node must resolve to a local template, and that template datastore must be included in `target_storages`.
 - `clone_snapshot`  
   Optional snapshot name to use when cloning from the template.
 - `vm_memory_mb`  
