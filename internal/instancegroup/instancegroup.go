@@ -97,8 +97,11 @@ type nodePlanState struct {
 	TemplateNode    string
 	TemplateVMID    int
 	TemplateStorage string
+	TotalMemoryMB   float64
 	FreeMemoryMB    float64
+	TotalCPUCores   float64
 	FreeCPUCores    float64
+	StorageTotalGB  map[string]float64
 	StorageFreeGB   map[string]float64
 }
 
@@ -429,11 +432,6 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 		return nil, err
 	}
 
-	vmids, vmidErr := g.allocateVMIDs(vmResources, delta)
-	if len(vmids) == 0 && vmidErr != nil {
-		return nil, vmidErr
-	}
-
 	var storageResources []proxmoxclient.ClusterResource
 	storageConfigs := map[string]proxmoxclient.StorageConfig{}
 	if len(g.cfg.TargetStorages) > 0 {
@@ -462,6 +460,11 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 	}
 	if len(g.cfg.TargetStorages) == 0 {
 		req.DiskGB = 0
+	}
+
+	vmids, vmidErr := g.allocateVMIDs(vmResources, delta)
+	if len(vmids) == 0 && vmidErr != nil {
+		return nil, vmidErr
 	}
 	plans := make([]provisionPlan, 0, len(vmids))
 	var errs []error
@@ -866,6 +869,7 @@ func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []pr
 		}
 
 		storageFree := map[string]float64{}
+		storageTotal := map[string]float64{}
 		if len(g.cfg.TargetStorages) > 0 {
 			for _, resource := range storageResources {
 				if resource.Type != "storage" {
@@ -885,8 +889,12 @@ func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []pr
 					continue
 				}
 				free := float64(resource.MaxDisk-resource.Disk) / 1024.0 / 1024.0 / 1024.0
+				total := float64(resource.MaxDisk) / 1024.0 / 1024.0 / 1024.0
 				if current, exists := storageFree[resource.Storage]; !exists || free > current {
 					storageFree[resource.Storage] = free
+				}
+				if current, exists := storageTotal[resource.Storage]; !exists || total > current {
+					storageTotal[resource.Storage] = total
 				}
 			}
 			if len(storageFree) == 0 {
@@ -896,13 +904,17 @@ func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []pr
 		}
 
 		totalCPU := float64(status.CPUInfo.CPUs)
+		totalMemoryMB := float64(status.Memory.Total) / 1024.0 / 1024.0
 		nodes = append(nodes, nodePlanState{
 			Name:            node,
 			TemplateNode:    templateChoice.Resource.Node,
 			TemplateVMID:    templateChoice.Resource.VMID,
 			TemplateStorage: templateChoice.Storage,
+			TotalMemoryMB:   totalMemoryMB,
 			FreeMemoryMB:    float64(status.Memory.Total-status.Memory.Used) / 1024.0 / 1024.0,
+			TotalCPUCores:   totalCPU,
 			FreeCPUCores:    totalCPU - (status.CPU * totalCPU),
+			StorageTotalGB:  storageTotal,
 			StorageFreeGB:   storageFree,
 		})
 	}
@@ -935,8 +947,11 @@ func (g *Group) buildCandidateNodes(states []nodePlanState) ([]scheduler.Node, [
 			TemplateNode:  state.TemplateNode,
 			TemplateVMID:  state.TemplateVMID,
 			TargetStorage: targetStorage,
+			TotalMemoryMB: state.TotalMemoryMB,
 			FreeMemoryMB:  state.FreeMemoryMB,
+			TotalDiskGB:   state.StorageTotalGB[targetStorage],
 			FreeDiskGB:    freeDiskGB,
+			TotalCPUCores: state.TotalCPUCores,
 			FreeCPUCores:  state.FreeCPUCores,
 		})
 	}
@@ -968,8 +983,11 @@ func (g *Group) diagnosticNodes(states []nodePlanState) []scheduler.Node {
 			TemplateNode:  state.TemplateNode,
 			TemplateVMID:  state.TemplateVMID,
 			TargetStorage: targetStorage,
+			TotalMemoryMB: state.TotalMemoryMB,
 			FreeMemoryMB:  state.FreeMemoryMB,
+			TotalDiskGB:   state.StorageTotalGB[targetStorage],
 			FreeDiskGB:    freeDiskGB,
+			TotalCPUCores: state.TotalCPUCores,
 			FreeCPUCores:  state.FreeCPUCores,
 		})
 	}
@@ -1318,7 +1336,6 @@ func (g *Group) allocateVMIDs(resources []proxmoxclient.ClusterResource, count i
 			used[resource.VMID] = struct{}{}
 		}
 	}
-
 	vmids := make([]int, 0, count)
 	for vmid := g.cfg.VMIDMin; vmid <= g.cfg.VMIDMax; vmid++ {
 		if _, exists := used[vmid]; exists {

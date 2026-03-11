@@ -53,8 +53,11 @@ type pluginConfig struct {
 	VMDiskDevice   string        `json:"vm_disk_device"`
 
 	NodeReserveMemoryMB int64  `json:"node_reserve_memory_mb"`
+	NodeReserveMemoryPercent int `json:"node_reserve_memory_percent"`
 	NodeReserveCPUCores int    `json:"node_reserve_cpu_cores"`
+	NodeReserveCPUPercent int  `json:"node_reserve_cpu_percent"`
 	NodeReserveDiskGB   int64  `json:"node_reserve_disk_gb"`
+	NodeReserveDiskPercent int `json:"node_reserve_disk_percent"`
 	Scheduler           string `json:"scheduler"`
 
 	MaxParallelClones  int `json:"max_parallel_clones"`
@@ -207,6 +210,15 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	}
 	if c.VMDiskMB < 0 {
 		errs = append(errs, fmt.Errorf("vm_disk_mb must be >= 0"))
+	}
+	if c.NodeReserveMemoryPercent < 0 || c.NodeReserveMemoryPercent > 100 {
+		errs = append(errs, fmt.Errorf("node_reserve_memory_percent must be between 0 and 100"))
+	}
+	if c.NodeReserveCPUPercent < 0 || c.NodeReserveCPUPercent > 100 {
+		errs = append(errs, fmt.Errorf("node_reserve_cpu_percent must be between 0 and 100"))
+	}
+	if c.NodeReserveDiskPercent < 0 || c.NodeReserveDiskPercent > 100 {
+		errs = append(errs, fmt.Errorf("node_reserve_disk_percent must be between 0 and 100"))
 	}
 	if c.NetworkMode != "static" && c.NetworkMode != "dhcp" {
 		errs = append(errs, fmt.Errorf("invalid network_mode: %s", c.NetworkMode))

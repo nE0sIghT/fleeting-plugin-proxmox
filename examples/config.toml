@@ -38,9 +38,9 @@ check_interval = 3
     max_parallel_clones = 2
     max_parallel_starts = 4
     max_parallel_deletes = 2
-    node_reserve_memory_mb = 4096
-    node_reserve_cpu_cores = 2
-    node_reserve_disk_gb = 50
+    node_reserve_memory_percent = 10
+    node_reserve_cpu_percent = 10
+    node_reserve_disk_percent = 10
 
     cloud_init_enabled = true
     cloud_init_interface = "ipconfig0"

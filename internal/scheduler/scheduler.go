@@ -16,9 +16,12 @@ const (
 )
 
 type Reserve struct {
-	MemoryMB int64
-	DiskGB   int64
-	CPUCores int
+	MemoryMB      int64
+	MemoryPercent int
+	DiskGB        int64
+	DiskPercent   int
+	CPUCores      int
+	CPUPercent    int
 }
 
 type Requirement struct {
@@ -32,8 +35,11 @@ type Node struct {
 	TemplateNode  string
 	TemplateVMID  int
 	TargetStorage string
+	TotalMemoryMB float64
 	FreeMemoryMB  float64
+	TotalDiskGB   float64
 	FreeDiskGB    float64
+	TotalCPUCores float64
 	FreeCPUCores  float64
 }
 
@@ -63,16 +69,20 @@ func New(strategy string) *Scheduler {
 func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requirement) (Node, error) {
 	eligible := make([]Node, 0, len(nodes))
 	for _, node := range nodes {
+		memoryReserve := reserve.memoryMBFor(node)
+		diskReserve := reserve.diskGBFor(node)
+		cpuReserve := reserve.cpuCoresFor(node)
+
 		// Reserve is a placement guard against the node's current free capacity, not a
 		// Proxmox reservation primitive. Nodes that would dip below the configured
 		// headroom after placing one more VM are excluded.
-		if node.FreeMemoryMB-requirement.MemoryMB < float64(reserve.MemoryMB) {
+		if node.FreeMemoryMB-requirement.MemoryMB < memoryReserve {
 			continue
 		}
-		if node.FreeDiskGB-requirement.DiskGB < float64(reserve.DiskGB) {
+		if node.FreeDiskGB-requirement.DiskGB < diskReserve {
 			continue
 		}
-		if node.FreeCPUCores-requirement.CPUCores < float64(reserve.CPUCores) {
+		if node.FreeCPUCores-requirement.CPUCores < cpuReserve {
 			continue
 		}
 		eligible = append(eligible, node)
@@ -131,18 +141,21 @@ func Diagnose(nodes []Node, reserve Reserve, requirement Requirement) []string {
 	reasons := make([]string, 0, len(nodes))
 	for _, node := range nodes {
 		var parts []string
-		if node.FreeMemoryMB-requirement.MemoryMB < float64(reserve.MemoryMB) {
-			parts = append(parts, fmt.Sprintf("memory free=%.0fMB need=%.0fMB reserve=%dMB", node.FreeMemoryMB, requirement.MemoryMB, reserve.MemoryMB))
+		memoryReserve := reserve.memoryMBFor(node)
+		diskReserve := reserve.diskGBFor(node)
+		cpuReserve := reserve.cpuCoresFor(node)
+		if node.FreeMemoryMB-requirement.MemoryMB < memoryReserve {
+			parts = append(parts, fmt.Sprintf("memory free=%.0fMB need=%.0fMB reserve=%.0fMB", node.FreeMemoryMB, requirement.MemoryMB, memoryReserve))
 		}
-		if node.FreeDiskGB-requirement.DiskGB < float64(reserve.DiskGB) {
+		if node.FreeDiskGB-requirement.DiskGB < diskReserve {
 			storage := node.TargetStorage
 			if storage == "" {
 				storage = "<default>"
 			}
-			parts = append(parts, fmt.Sprintf("disk[%s] free=%.1fGB need=%.1fGB reserve=%dGB", storage, node.FreeDiskGB, requirement.DiskGB, reserve.DiskGB))
+			parts = append(parts, fmt.Sprintf("disk[%s] free=%.1fGB need=%.1fGB reserve=%.1fGB", storage, node.FreeDiskGB, requirement.DiskGB, diskReserve))
 		}
-		if node.FreeCPUCores-requirement.CPUCores < float64(reserve.CPUCores) {
-			parts = append(parts, fmt.Sprintf("cpu free=%.2f need=%.2f reserve=%d", node.FreeCPUCores, requirement.CPUCores, reserve.CPUCores))
+		if node.FreeCPUCores-requirement.CPUCores < cpuReserve {
+			parts = append(parts, fmt.Sprintf("cpu free=%.2f need=%.2f reserve=%.2f", node.FreeCPUCores, requirement.CPUCores, cpuReserve))
 		}
 		if len(parts) == 0 {
 			continue
@@ -150,4 +163,25 @@ func Diagnose(nodes []Node, reserve Reserve, requirement Requirement) []string {
 		reasons = append(reasons, fmt.Sprintf("%s: %s", node.Name, strings.Join(parts, ", ")))
 	}
 	return reasons
+}
+
+func (r Reserve) memoryMBFor(node Node) float64 {
+	if r.MemoryPercent > 0 && node.TotalMemoryMB > 0 {
+		return node.TotalMemoryMB * float64(r.MemoryPercent) / 100.0
+	}
+	return float64(r.MemoryMB)
+}
+
+func (r Reserve) diskGBFor(node Node) float64 {
+	if r.DiskPercent > 0 && node.TotalDiskGB > 0 {
+		return node.TotalDiskGB * float64(r.DiskPercent) / 100.0
+	}
+	return float64(r.DiskGB)
+}
+
+func (r Reserve) cpuCoresFor(node Node) float64 {
+	if r.CPUPercent > 0 && node.TotalCPUCores > 0 {
+		return node.TotalCPUCores * float64(r.CPUPercent) / 100.0
+	}
+	return float64(r.CPUCores)
 }

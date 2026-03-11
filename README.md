@@ -56,8 +56,11 @@ Recommended plugin configuration:
 - `nameserver`
 - `searchdomain`
 - `node_reserve_memory_mb`
+- `node_reserve_memory_percent`
 - `node_reserve_cpu_cores`
+- `node_reserve_cpu_percent`
 - `node_reserve_disk_gb`
+- `node_reserve_disk_percent`
 
 ## Plugin configuration reference
 
@@ -84,7 +87,7 @@ Recommended plugin configuration:
 - `nodes`  
   Node allowlist used for placement. Required. Accepts a string or list.
 - `clone_mode`  
-  `linked` or `full`. Default: `linked`.
+  `auto`, `linked`, or `full`. Default: `auto`.
 - `target_storages`  
   Optional datastore allowlist. Accepts a string or list. Supported only with `clone_mode = "full"`, because Proxmox does not allow selecting `storage` for linked clones. The plugin chooses the most free matching datastore per node and uses that datastore's free space for disk placement checks. A datastore is considered usable on a node only when both conditions hold: Proxmox storage config allows that node in the storage `Nodes` setting, and storage capacity is reported for that storage on that node.
 - `clone_snapshot`  
@@ -99,10 +102,16 @@ Recommended plugin configuration:
   Optional Proxmox disk device name used for `vm_disk_mb`, for example `scsi0`. When unset, the plugin uses `bootdisk` from the template and falls back to common primary disk names.
 - `node_reserve_memory_mb`  
   Minimum free memory that must remain on the selected node after placement.
+- `node_reserve_memory_percent`  
+  Percentage of total node memory that must remain free after placement. When set, it takes precedence over `node_reserve_memory_mb`.
 - `node_reserve_cpu_cores`  
   Minimum free CPU headroom that must remain on the selected node after placement.
+- `node_reserve_cpu_percent`  
+  Percentage of total node CPU cores that must remain free after placement. When set, it takes precedence over `node_reserve_cpu_cores`.
 - `node_reserve_disk_gb`  
   Minimum free disk that must remain on the selected node after placement.
+- `node_reserve_disk_percent`  
+  Percentage of total target datastore capacity that must remain free after placement. When set, it takes precedence over `node_reserve_disk_gb`.
 - `scheduler`  
   Node selection policy: `balanced`, `most_free_ram`, `most_free_cpu`, or `round_robin`. Default: `balanced`.
 - `max_parallel_clones`  
@@ -118,7 +127,7 @@ Recommended plugin configuration:
 - `start_timeout`  
   Timeout for VM start and readiness wait. Default: `5m`.
 - `shutdown_timeout`  
-  Timeout for graceful shutdown before forced stop. Default: `2m`.
+  Timeout for forced stop and delete path task completion. Default: `2m`.
 - `cloud_init_enabled`  
   Must remain `true` in v1. Default: `true`.
 - `cloud_init_interface`  
@@ -184,13 +193,18 @@ Datastore placement works as follows:
 
 ## Node reserve semantics
 
-`node_reserve_memory_mb`, `node_reserve_cpu_cores`, and `node_reserve_disk_gb` are admission filters based on the current free resources reported by Proxmox for a node.
+`node_reserve_memory_mb` / `node_reserve_memory_percent`, `node_reserve_cpu_cores` / `node_reserve_cpu_percent`, and `node_reserve_disk_gb` / `node_reserve_disk_percent` are admission filters based on the current free resources reported by Proxmox for a node.
 
 They are evaluated as:
 
 - current free memory minus the template VM memory must stay above `node_reserve_memory_mb`
 - current free CPU headroom minus the template VM vCPU count must stay above `node_reserve_cpu_cores`
 - current free disk minus the template VM disk size must stay above `node_reserve_disk_gb`
+- when the corresponding `*_percent` field is set, the reserve is derived from total node or datastore capacity instead of the absolute field
+
+For CPU specifically, the plugin does not use load average. It converts the current Proxmox CPU utilization fraction into free cores:
+
+- `free_cpu_cores = total_cpus - (cpu_utilization * total_cpus)`
 
 They do not create reservations in Proxmox and they do not use a separate reservation accounting model.
 
