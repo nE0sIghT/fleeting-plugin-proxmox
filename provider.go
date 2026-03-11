@@ -36,7 +36,7 @@ type InstanceGroup struct {
 }
 
 func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings provider.Settings) (provider.ProviderInfo, error) {
-	g.log = log.With("cluster", g.ClusterName, "pool", g.Pool, "template_vmids", fmt.Sprintf("%v", g.TemplateVMIDs))
+	g.log = log.With("cluster", g.ClusterName, "pool", g.Pool)
 	g.settings = settings
 
 	if err := g.config().validate(g.settings); err != nil {

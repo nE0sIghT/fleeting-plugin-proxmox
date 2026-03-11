@@ -468,16 +468,12 @@ func TestTargetStorageMustExistOnSelectedNode(t *testing.T) {
 	mock.storages = []map[string]any{
 		{
 			"type":    "storage",
-			"node":    "",
+			"node":    "node2",
 			"storage": "ceph-vm",
 			"disk":    int64(100 * 1024 * 1024 * 1024),
 			"maxdisk": int64(500 * 1024 * 1024 * 1024),
 			"shared":  1,
 		},
-	}
-	mock.storageCfgs["ceph-vm"] = map[string]any{
-		"storage": "ceph-vm",
-		"nodes":   []string{"node2"},
 	}
 
 	server := httptest.NewServer(mock.handler(t))
@@ -555,16 +551,20 @@ func TestSharedTemplateFallbackUsesFullCloneOnSharedTemplateStorage(t *testing.T
 	mock.storages = []map[string]any{
 		{
 			"type":    "storage",
-			"node":    "",
+			"node":    "node1",
 			"storage": "ceph-vm",
 			"disk":    int64(100 * 1024 * 1024 * 1024),
 			"maxdisk": int64(500 * 1024 * 1024 * 1024),
 			"shared":  1,
 		},
-	}
-	mock.storageCfgs["ceph-vm"] = map[string]any{
-		"storage": "ceph-vm",
-		"nodes":   []string{"node1", "node2"},
+		{
+			"type":    "storage",
+			"node":    "node2",
+			"storage": "ceph-vm",
+			"disk":    int64(100 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  1,
+		},
 	}
 
 	server := httptest.NewServer(mock.handler(t))
@@ -603,16 +603,20 @@ func TestLinkedCloneModeFailsInitWithoutLocalTemplate(t *testing.T) {
 	mock.storages = []map[string]any{
 		{
 			"type":    "storage",
-			"node":    "",
+			"node":    "node1",
 			"storage": "ceph-vm",
 			"disk":    int64(100 * 1024 * 1024 * 1024),
 			"maxdisk": int64(500 * 1024 * 1024 * 1024),
 			"shared":  1,
 		},
-	}
-	mock.storageCfgs["ceph-vm"] = map[string]any{
-		"storage": "ceph-vm",
-		"nodes":   []string{"node1", "node2"},
+		{
+			"type":    "storage",
+			"node":    "node2",
+			"storage": "ceph-vm",
+			"disk":    int64(100 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  1,
+		},
 	}
 
 	server := httptest.NewServer(mock.handler(t))

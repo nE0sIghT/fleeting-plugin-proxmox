@@ -208,6 +208,48 @@ For CPU specifically, the plugin does not use load average. It converts the curr
 
 They do not create reservations in Proxmox and they do not use a separate reservation accounting model.
 
+## RBAC example
+
+One practical way to split Proxmox privileges for this plugin is into three roles.
+
+`GitlabFleetingNodes`
+
+- assign on `/nodes/<allowed-node>`
+- privileges:
+  - `Sys.Audit`
+
+`GitlabFleetingPool`
+
+- assign on `/pool/<managed-pool>`
+- privileges:
+  - `Pool.Audit`
+  - `Sys.Audit`
+  - `Datastore.Audit`
+  - `Datastore.AllocateSpace`
+  - `VM.Audit`
+  - `VM.Clone`
+  - `VM.Allocate`
+  - `VM.Config.CPU`
+  - `VM.Config.Memory`
+  - `VM.Config.Disk`
+  - `VM.Config.Options`
+  - `VM.Config.Cloudinit`
+  - `VM.PowerMgmt`
+  - `VM.Monitor`
+
+`GitlabFleetingSDN`
+
+- assign on `/sdn/zones/localnetwork`
+- privileges:
+  - `SDN.Use`
+
+Notes:
+
+- the storage privileges above assume target storages are members of the managed pool
+- `VM.Monitor` is required on Proxmox VE 8 for guest-agent IP discovery
+- `Sys.Audit` is retained on the pool role for practical compatibility with newer Proxmox privilege changes
+- if the environment does not use SDN-backed bridges, the SDN role can be omitted
+
 ## Example GitLab Runner configuration
 
 See [`examples/config.toml`](/workspace/fleeting-plugin-proxmox/examples/config.toml) for a complete example.

@@ -79,6 +79,7 @@ type Group struct {
 	pendingByNode   map[string]pendingReservation
 	pendingVMIDs    map[int]struct{}
 	templatesByNode map[string]templateChoice
+	storageNodes    map[string]map[string]struct{}
 	templateSizing  proxmoxclient.ClusterResource
 	templateDisk    string
 }
@@ -115,9 +116,9 @@ type nodePlanState struct {
 }
 
 type templateChoice struct {
-	Resource      proxmoxclient.ClusterResource
-	Storage       string
-	StorageConfig proxmoxclient.StorageConfig
+	Resource     proxmoxclient.ClusterResource
+	Storage      string
+	StorageNodes map[string]struct{}
 }
 
 func New(client *proxmoxclient.Client, log hclog.Logger, cfg Config, pool *ippool.Pool, cloneLimiter, startLimiter, deleteLimiter *limiter.Limiter) *Group {
@@ -153,21 +154,27 @@ func (g *Group) Init(ctx context.Context) error {
 		return err
 	}
 
+	storageResources, err := g.client.ListClusterResources(ctx, "storage")
+	if err != nil {
+		return err
+	}
+
 	for _, node := range g.cfg.Nodes {
 		if _, err := g.client.GetNodeStatus(ctx, node); err != nil {
 			return fmt.Errorf("verify node %s: %w", node, err)
 		}
 	}
 
-	templateStorageConfigs, err := g.loadTemplateStorageConfigs(ctx, templateResources)
+	templateStorageNodes, err := g.loadTemplateStorageNodes(ctx, templateResources, storageResources)
 	if err != nil {
 		return err
 	}
 
-	templatesByNode, templateSizing, templateDisk, err := g.resolveNodeTemplates(ctx, templateResources, templateStorageConfigs)
+	templatesByNode, templateSizing, templateDisk, err := g.resolveNodeTemplates(ctx, templateResources, templateStorageNodes)
 	if err != nil {
 		return err
 	}
+	g.storageNodes = indexStorageNodes(storageResources)
 	g.templatesByNode = templatesByNode
 	g.templateSizing = templateSizing
 	g.templateDisk = templateDisk
@@ -445,22 +452,16 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 	}
 
 	var storageResources []proxmoxclient.ClusterResource
-	storageConfigs := map[string]proxmoxclient.StorageConfig{}
+	storageNodes := map[string]map[string]struct{}{}
 	if len(g.cfg.TargetStorages) > 0 {
 		storageResources, err = g.client.ListClusterResources(ctx, "storage")
 		if err != nil {
 			return nil, err
 		}
-		for _, storage := range g.cfg.TargetStorages {
-			cfg, err := g.client.GetStorageConfig(ctx, storage)
-			if err != nil {
-				return nil, fmt.Errorf("get storage config %s: %w", storage, err)
-			}
-			storageConfigs[storage] = cfg
-		}
+		storageNodes = indexStorageNodes(storageResources)
 	}
 
-	states, skippedReasons, err := g.collectNodePlanStates(ctx, storageResources, storageConfigs)
+	states, skippedReasons, err := g.collectNodePlanStates(ctx, storageResources, storageNodes)
 	if err != nil {
 		return nil, err
 	}
@@ -872,7 +873,7 @@ func (g *Group) discoverIPAddress(ctx context.Context, node string, vmid int, ex
 	}
 }
 
-func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []proxmoxclient.ClusterResource, storageConfigs map[string]proxmoxclient.StorageConfig) ([]nodePlanState, []string, error) {
+func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []proxmoxclient.ClusterResource, storageNodes map[string]map[string]struct{}) ([]nodePlanState, []string, error) {
 	nodes := make([]nodePlanState, 0, len(g.cfg.Nodes))
 	skipped := make([]string, 0)
 	for _, node := range g.cfg.Nodes {
@@ -900,11 +901,11 @@ func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []pr
 				if !containsString(g.cfg.TargetStorages, resource.Storage) {
 					continue
 				}
-				config, ok := storageConfigs[resource.Storage]
-				if !ok || !storageAllowsNode(config, node) {
+				nodes, ok := storageNodes[resource.Storage]
+				if !ok || !storageAllowsNode(nodes, node) {
 					continue
 				}
-				if templateChoice.Resource.Node != node && !storageAllowsNode(config, templateChoice.Resource.Node) {
+				if templateChoice.Resource.Node != node && !storageAllowsNode(nodes, templateChoice.Resource.Node) {
 					continue
 				}
 				free := float64(resource.MaxDisk-resource.Disk) / 1024.0 / 1024.0 / 1024.0
@@ -1087,21 +1088,33 @@ func (g *Group) releasePendingPlan(plan provisionPlan) {
 	delete(g.pendingVMIDs, plan.VMID)
 }
 
-func storageAllowsNode(config proxmoxclient.StorageConfig, node string) bool {
-	if len(config.Nodes) == 0 {
+func storageAllowsNode(nodes map[string]struct{}, node string) bool {
+	if len(nodes) == 0 {
 		return true
 	}
-	for _, allowedNode := range config.Nodes {
-		if allowedNode == node {
-			return true
-		}
-	}
-	return false
+	_, ok := nodes[node]
+	return ok
 }
 
-func (g *Group) loadTemplateStorageConfigs(ctx context.Context, templates []proxmoxclient.ClusterResource) (map[int]proxmoxclient.StorageConfig, error) {
-	configs := make(map[int]proxmoxclient.StorageConfig, len(templates))
-	seenStorages := map[string]proxmoxclient.StorageConfig{}
+func indexStorageNodes(resources []proxmoxclient.ClusterResource) map[string]map[string]struct{} {
+	nodesByStorage := make(map[string]map[string]struct{})
+	for _, resource := range resources {
+		if resource.Type != "storage" || resource.Storage == "" || resource.Node == "" {
+			continue
+		}
+		nodes := nodesByStorage[resource.Storage]
+		if nodes == nil {
+			nodes = map[string]struct{}{}
+			nodesByStorage[resource.Storage] = nodes
+		}
+		nodes[resource.Node] = struct{}{}
+	}
+	return nodesByStorage
+}
+
+func (g *Group) loadTemplateStorageNodes(ctx context.Context, templates []proxmoxclient.ClusterResource, storageResources []proxmoxclient.ClusterResource) (map[int]map[string]struct{}, error) {
+	configs := make(map[int]map[string]struct{}, len(templates))
+	nodesByStorage := indexStorageNodes(storageResources)
 	for _, template := range templates {
 		config, err := g.client.GetVMConfig(ctx, template.Node, template.VMID)
 		if err != nil {
@@ -1115,21 +1128,12 @@ func (g *Group) loadTemplateStorageConfigs(ctx context.Context, templates []prox
 		if err != nil {
 			return nil, fmt.Errorf("resolve template storage for %d: %w", template.VMID, err)
 		}
-		if existing, ok := seenStorages[storageName]; ok {
-			configs[template.VMID] = existing
-			continue
-		}
-		storageConfig, err := g.client.GetStorageConfig(ctx, storageName)
-		if err != nil {
-			return nil, fmt.Errorf("get template storage config %s: %w", storageName, err)
-		}
-		seenStorages[storageName] = storageConfig
-		configs[template.VMID] = storageConfig
+		configs[template.VMID] = nodesByStorage[storageName]
 	}
 	return configs, nil
 }
 
-func (g *Group) resolveNodeTemplates(ctx context.Context, templates []proxmoxclient.ClusterResource, storageConfigs map[int]proxmoxclient.StorageConfig) (map[string]templateChoice, proxmoxclient.ClusterResource, string, error) {
+func (g *Group) resolveNodeTemplates(ctx context.Context, templates []proxmoxclient.ClusterResource, storageNodes map[int]map[string]struct{}) (map[string]templateChoice, proxmoxclient.ClusterResource, string, error) {
 	choices := make(map[string]templateChoice, len(g.cfg.Nodes))
 	localTemplateByNode := map[string]templateChoice{}
 	var sizingTemplate proxmoxclient.ClusterResource
@@ -1165,9 +1169,9 @@ func (g *Group) resolveNodeTemplates(ctx context.Context, templates []proxmoxcli
 			return nil, proxmoxclient.ClusterResource{}, "", fmt.Errorf("resolve template storage for %d: %w", template.VMID, err)
 		}
 		choice := templateChoice{
-			Resource:      template,
-			Storage:       storageName,
-			StorageConfig: storageConfigs[template.VMID],
+			Resource:     template,
+			Storage:      storageName,
+			StorageNodes: storageNodes[template.VMID],
 		}
 
 		if _, exists := localTemplateByNode[template.Node]; exists {
@@ -1188,7 +1192,7 @@ func (g *Group) resolveNodeTemplates(ctx context.Context, templates []proxmoxcli
 			if !containsString(g.cfg.TargetStorages, choice.Storage) {
 				continue
 			}
-			if !storageAllowsNode(choice.StorageConfig, node) {
+			if !storageAllowsNode(choice.StorageNodes, node) {
 				continue
 			}
 			choices[node] = choice
@@ -1236,11 +1240,15 @@ func (g *Group) logEffectiveTopology() {
 
 		cloneMode := g.cfg.CloneMode
 		targetStorage := "<proxmox-default>"
-		if g.cfg.CloneMode == "auto" && choice.Resource.Node == node {
-			cloneMode = fmt.Sprintf("auto(linked on %s, full otherwise)", choice.Storage)
+		if len(g.cfg.TargetStorages) > 0 {
+			eligible := g.eligibleTargetStorages(node, choice)
+			if len(eligible) > 0 {
+				targetStorage = strings.Join(eligible, ",")
+			} else {
+				targetStorage = "<none>"
+			}
+		} else if g.cfg.CloneMode == "auto" && choice.Resource.Node == node {
 			targetStorage = choice.Storage
-		} else if len(g.cfg.TargetStorages) > 0 {
-			targetStorage = strings.Join(g.cfg.TargetStorages, ",")
 		}
 
 		g.log.Info(
@@ -1253,6 +1261,21 @@ func (g *Group) logEffectiveTopology() {
 			"target_storage_effective", targetStorage,
 		)
 	}
+}
+
+func (g *Group) eligibleTargetStorages(node string, choice templateChoice) []string {
+	eligible := make([]string, 0, len(g.cfg.TargetStorages))
+	for _, storage := range g.cfg.TargetStorages {
+		nodes := g.storageNodes[storage]
+		if !storageAllowsNode(nodes, node) {
+			continue
+		}
+		if choice.Resource.Node != node && !storageAllowsNode(nodes, choice.Resource.Node) {
+			continue
+		}
+		eligible = append(eligible, storage)
+	}
+	return eligible
 }
 
 func containsString(values []string, needle string) bool {
