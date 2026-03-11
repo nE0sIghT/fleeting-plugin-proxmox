@@ -1235,12 +1235,12 @@ func (g *Group) logEffectiveTopology() {
 		}
 
 		cloneMode := g.cfg.CloneMode
-		targetStorage := "<default>"
-		if len(g.cfg.TargetStorages) > 0 {
-			targetStorage = strings.Join(g.cfg.TargetStorages, ",")
-		}
+		targetStorage := "<proxmox-default>"
 		if g.cfg.CloneMode == "auto" && choice.Resource.Node == node {
 			cloneMode = fmt.Sprintf("auto(linked on %s, full otherwise)", choice.Storage)
+			targetStorage = choice.Storage
+		} else if len(g.cfg.TargetStorages) > 0 {
+			targetStorage = strings.Join(g.cfg.TargetStorages, ",")
 		}
 
 		g.log.Info(
