@@ -3,6 +3,7 @@ package scheduler
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 type Strategy string
@@ -27,15 +28,29 @@ type Requirement struct {
 }
 
 type Node struct {
-	Name         string
-	FreeMemoryMB float64
-	FreeDiskGB   float64
-	FreeCPUCores float64
+	Name          string
+	TemplateNode  string
+	TemplateVMID  int
+	TargetStorage string
+	FreeMemoryMB  float64
+	FreeDiskGB    float64
+	FreeCPUCores  float64
 }
 
 type Scheduler struct {
 	strategy Strategy
 	next     int
+}
+
+type PlacementError struct {
+	Reasons []string
+}
+
+func (e *PlacementError) Error() string {
+	if len(e.Reasons) == 0 {
+		return "no eligible nodes satisfy configured headroom"
+	}
+	return fmt.Sprintf("no eligible nodes satisfy configured headroom: %s", strings.Join(e.Reasons, "; "))
 }
 
 func New(strategy string) *Scheduler {
@@ -64,7 +79,7 @@ func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requiremen
 	}
 
 	if len(eligible) == 0 {
-		return Node{}, fmt.Errorf("no eligible nodes satisfy configured headroom")
+		return Node{}, &PlacementError{Reasons: Diagnose(nodes, reserve, requirement)}
 	}
 
 	switch s.strategy {
@@ -110,4 +125,29 @@ func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requiremen
 	}
 
 	return eligible[0], nil
+}
+
+func Diagnose(nodes []Node, reserve Reserve, requirement Requirement) []string {
+	reasons := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		var parts []string
+		if node.FreeMemoryMB-requirement.MemoryMB < float64(reserve.MemoryMB) {
+			parts = append(parts, fmt.Sprintf("memory free=%.0fMB need=%.0fMB reserve=%dMB", node.FreeMemoryMB, requirement.MemoryMB, reserve.MemoryMB))
+		}
+		if node.FreeDiskGB-requirement.DiskGB < float64(reserve.DiskGB) {
+			storage := node.TargetStorage
+			if storage == "" {
+				storage = "<default>"
+			}
+			parts = append(parts, fmt.Sprintf("disk[%s] free=%.1fGB need=%.1fGB reserve=%dGB", storage, node.FreeDiskGB, requirement.DiskGB, reserve.DiskGB))
+		}
+		if node.FreeCPUCores-requirement.CPUCores < float64(reserve.CPUCores) {
+			parts = append(parts, fmt.Sprintf("cpu free=%.2f need=%.2f reserve=%d", node.FreeCPUCores, requirement.CPUCores, reserve.CPUCores))
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		reasons = append(reasons, fmt.Sprintf("%s: %s", node.Name, strings.Join(parts, ", ")))
+	}
+	return reasons
 }

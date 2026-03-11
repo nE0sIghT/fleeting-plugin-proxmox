@@ -81,12 +81,32 @@ type VMConfig struct {
 	Tags         string `json:"tags"`
 	Description  string `json:"description"`
 	IPConfig0    string `json:"ipconfig0"`
+	BootDisk     string `json:"bootdisk"`
+	SCSI0        string `json:"scsi0"`
+	VirtIO0      string `json:"virtio0"`
+	SATA0        string `json:"sata0"`
+	IDE0         string `json:"ide0"`
 	SSHKeys      string `json:"sshkeys"`
 	CIUser       string `json:"ciuser"`
 	NameServer   string `json:"nameserver"`
 	SearchDomain string `json:"searchdomain"`
 	Agent        string `json:"agent"`
 	Template     int    `json:"template"`
+}
+
+func (c VMConfig) DiskValue(device string) string {
+	switch device {
+	case "scsi0":
+		return c.SCSI0
+	case "virtio0":
+		return c.VirtIO0
+	case "sata0":
+		return c.SATA0
+	case "ide0":
+		return c.IDE0
+	default:
+		return ""
+	}
 }
 
 type VMStatus struct {
@@ -101,6 +121,41 @@ type TaskStatus struct {
 
 type PoolInfo struct {
 	PoolID string `json:"poolid"`
+}
+
+type StringList []string
+
+func (o *StringList) UnmarshalJSON(data []byte) error {
+	var one string
+	if err := json.Unmarshal(data, &one); err == nil {
+		if strings.Contains(one, ",") {
+			parts := strings.Split(one, ",")
+			values := make([]string, 0, len(parts))
+			for _, part := range parts {
+				part = strings.TrimSpace(part)
+				if part != "" {
+					values = append(values, part)
+				}
+			}
+			*o = values
+			return nil
+		}
+		*o = []string{strings.TrimSpace(one)}
+		return nil
+	}
+
+	var many []string
+	if err := json.Unmarshal(data, &many); err == nil {
+		*o = many
+		return nil
+	}
+
+	return fmt.Errorf("invalid string list: %s", string(data))
+}
+
+type StorageConfig struct {
+	Storage string     `json:"storage"`
+	Nodes   StringList `json:"nodes"`
 }
 
 type AgentInterface struct {
@@ -125,15 +180,17 @@ type CloneRequest struct {
 
 type SetConfigRequest struct {
 	CloudInitInterface string
-	Pool               string
 	Tags               []string
 	Description        string
 	IPConfig           string
+	MemoryMB           int64
+	CPUCores           int
 	CIUser             string
 	SSHKeys            []string
 	NameServer         string
 	SearchDomain       string
 	AgentEnabled       bool
+	DisableCIUpgrade   bool
 }
 
 func New(cfg Config) (*Client, error) {
@@ -176,6 +233,12 @@ func (c *Client) GetVersion(ctx context.Context) (Version, error) {
 func (c *Client) GetPool(ctx context.Context, pool string) (PoolInfo, error) {
 	var out PoolInfo
 	err := c.get(ctx, path.Join("/pools", pool), &out)
+	return out, err
+}
+
+func (c *Client) GetStorageConfig(ctx context.Context, storage string) (StorageConfig, error) {
+	var out StorageConfig
+	err := c.get(ctx, path.Join("/storage", storage), &out)
 	return out, err
 }
 
@@ -229,9 +292,14 @@ func (c *Client) CloneVM(ctx context.Context, sourceNode string, templateVMID in
 
 func (c *Client) SetVMConfig(ctx context.Context, node string, vmid int, req SetConfigRequest) (string, error) {
 	form := url.Values{}
-	form.Set("pool", req.Pool)
 	form.Set("tags", strings.Join(req.Tags, ";"))
 	form.Set("description", req.Description)
+	if req.MemoryMB > 0 {
+		form.Set("memory", fmt.Sprintf("%d", req.MemoryMB))
+	}
+	if req.CPUCores > 0 {
+		form.Set("cores", fmt.Sprintf("%d", req.CPUCores))
+	}
 	if req.CloudInitInterface == "" {
 		req.CloudInitInterface = "ipconfig0"
 	}
@@ -240,7 +308,18 @@ func (c *Client) SetVMConfig(ctx context.Context, node string, vmid int, req Set
 		form.Set("ciuser", req.CIUser)
 	}
 	if len(req.SSHKeys) > 0 {
-		form.Set("sshkeys", strings.Join(req.SSHKeys, "\n"))
+		keys := make([]string, 0, len(req.SSHKeys))
+		for _, key := range req.SSHKeys {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				keys = append(keys, key)
+			}
+		}
+		if len(keys) > 0 {
+			encoded := url.QueryEscape(strings.Join(keys, "\n"))
+			encoded = strings.ReplaceAll(encoded, "+", "%20")
+			form.Set("sshkeys", encoded)
+		}
 	}
 	if req.NameServer != "" {
 		form.Set("nameserver", req.NameServer)
@@ -248,10 +327,20 @@ func (c *Client) SetVMConfig(ctx context.Context, node string, vmid int, req Set
 	if req.SearchDomain != "" {
 		form.Set("searchdomain", req.SearchDomain)
 	}
+	if req.DisableCIUpgrade {
+		form.Set("ciupgrade", "0")
+	}
 	if req.AgentEnabled {
 		form.Set("agent", "1")
 	}
 	return c.postString(ctx, path.Join("/nodes", node, "qemu", fmt.Sprintf("%d", vmid), "config"), form)
+}
+
+func (c *Client) ResizeVMDisk(ctx context.Context, node string, vmid int, disk string, sizeMB int64) (string, error) {
+	form := url.Values{}
+	form.Set("disk", disk)
+	form.Set("size", fmt.Sprintf("%dM", sizeMB))
+	return c.writeString(ctx, http.MethodPut, path.Join("/nodes", node, "qemu", fmt.Sprintf("%d", vmid), "resize"), form)
 }
 
 func (c *Client) StartVM(ctx context.Context, node string, vmid int) (string, error) {
@@ -343,7 +432,29 @@ func (c *Client) postString(ctx context.Context, p string, form url.Values) (str
 }
 
 func (c *Client) deleteString(ctx context.Context, p string, form url.Values) (string, error) {
-	return c.writeString(ctx, http.MethodDelete, p, form)
+	u := *c.baseURL
+	u.Path = path.Join(c.baseURL.Path, "/api2/json", p)
+	if form != nil {
+		u.RawQuery = form.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", c.authHeader)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var out string
+	if err := decodeResponse(resp, &out); err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
 func (c *Client) writeString(ctx context.Context, method, p string, form url.Values) (string, error) {

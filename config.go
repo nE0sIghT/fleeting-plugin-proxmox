@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultCloneMode         = "linked"
+	defaultCloneMode         = "auto"
 	defaultNetworkMode       = "static"
 	defaultTaskPollInterval  = 2 * time.Second
 	defaultCloneTimeout      = 10 * time.Minute
@@ -39,7 +39,7 @@ type pluginConfig struct {
 	TLSInsecureSkipVerify bool          `json:"tls_insecure_skip_verify"`
 	ClusterName           string        `json:"cluster_name"`
 	Pool                  string        `json:"pool"`
-	TemplateVMID          int           `json:"template_vmid"`
+	TemplateVMIDs         []int         `json:"template_vmids"`
 	NamePrefix            string        `json:"name_prefix"`
 	VMIDRange             string        `json:"vmid_range"`
 	Nodes                 LaxStringList `json:"nodes"`
@@ -47,6 +47,10 @@ type pluginConfig struct {
 	CloneMode      string        `json:"clone_mode"`
 	TargetStorages LaxStringList `json:"target_storages"`
 	CloneSnapshot  string        `json:"clone_snapshot"`
+	VMMemoryMB     int64         `json:"vm_memory_mb"`
+	VMCPUCores     int           `json:"vm_cpu_cores"`
+	VMDiskMB       int64         `json:"vm_disk_mb"`
+	VMDiskDevice   string        `json:"vm_disk_device"`
 
 	NodeReserveMemoryMB int64  `json:"node_reserve_memory_mb"`
 	NodeReserveCPUCores int    `json:"node_reserve_cpu_cores"`
@@ -174,8 +178,8 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	if c.Pool == "" {
 		errs = append(errs, fmt.Errorf("missing required plugin config: pool"))
 	}
-	if c.TemplateVMID <= 0 {
-		errs = append(errs, fmt.Errorf("missing required plugin config: template_vmid"))
+	if len(c.TemplateVMIDs) == 0 {
+		errs = append(errs, fmt.Errorf("missing required plugin config: template_vmids"))
 	}
 	if c.NamePrefix == "" {
 		errs = append(errs, fmt.Errorf("missing required plugin config: name_prefix"))
@@ -192,8 +196,17 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	if settings.OS != "" && settings.OS != "linux" {
 		errs = append(errs, fmt.Errorf("unsupported connector OS: %s", settings.OS))
 	}
-	if c.CloneMode != "linked" && c.CloneMode != "full" {
+	if c.CloneMode != "auto" && c.CloneMode != "linked" && c.CloneMode != "full" {
 		errs = append(errs, fmt.Errorf("invalid clone_mode: %s", c.CloneMode))
+	}
+	if c.VMMemoryMB < 0 {
+		errs = append(errs, fmt.Errorf("vm_memory_mb must be >= 0"))
+	}
+	if c.VMCPUCores < 0 {
+		errs = append(errs, fmt.Errorf("vm_cpu_cores must be >= 0"))
+	}
+	if c.VMDiskMB < 0 {
+		errs = append(errs, fmt.Errorf("vm_disk_mb must be >= 0"))
 	}
 	if c.NetworkMode != "static" && c.NetworkMode != "dhcp" {
 		errs = append(errs, fmt.Errorf("invalid network_mode: %s", c.NetworkMode))
@@ -215,6 +228,20 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	}
 
 	c.parsedVMIDRange = parseVMIDRange(c.VMIDRange, &errs)
+
+	seenTemplateVMIDs := map[int]struct{}{}
+	for _, vmid := range c.TemplateVMIDs {
+		if vmid <= 0 {
+			errs = append(errs, fmt.Errorf("template_vmids contains invalid VMID %d", vmid))
+			continue
+		}
+		if _, exists := seenTemplateVMIDs[vmid]; exists {
+			errs = append(errs, fmt.Errorf("template_vmids contains duplicate VMID %d", vmid))
+			continue
+		}
+		seenTemplateVMIDs[vmid] = struct{}{}
+	}
+
 	c.parsedTaskPoll = parseDurationField("task_poll_interval", c.TaskPollInterval, &errs)
 	c.parsedCloneTimeout = parseDurationField("clone_timeout", c.CloneTimeout, &errs)
 	c.parsedStartTimeout = parseDurationField("start_timeout", c.StartTimeout, &errs)

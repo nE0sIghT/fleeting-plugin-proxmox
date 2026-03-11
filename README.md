@@ -39,7 +39,7 @@ Required plugin configuration:
 - `token_id`
 - `token_secret`
 - `pool`
-- `template_vmid`
+- `template_vmids`
 - `name_prefix`
 - `vmid_range`
 - `nodes`
@@ -75,8 +75,8 @@ Recommended plugin configuration:
   Logical cluster identifier used in the Fleeting provider ID. Default: `default`.
 - `pool`  
   Dedicated Proxmox pool for managed VMs. Required.
-- `template_vmid`  
-  Source QEMU template VMID. Required.
+- `template_vmids`  
+  Source QEMU template VMIDs. Required. The plugin prefers a template that already lives on the selected node; if the node has no local template, it requires a shared clone path via one of the configured `target_storages`.
 - `name_prefix`  
   Prefix used for created VM names and management tags. Required.
 - `vmid_range`  
@@ -86,9 +86,17 @@ Recommended plugin configuration:
 - `clone_mode`  
   `linked` or `full`. Default: `linked`.
 - `target_storages`  
-  Optional datastore allowlist. Accepts a string or list. The plugin chooses the most free matching datastore for the selected node.
+  Optional datastore allowlist. Accepts a string or list. Supported only with `clone_mode = "full"`, because Proxmox does not allow selecting `storage` for linked clones. The plugin chooses the most free matching datastore per node and uses that datastore's free space for disk placement checks. A datastore is considered usable on a node only when both conditions hold: Proxmox storage config allows that node in the storage `Nodes` setting, and storage capacity is reported for that storage on that node.
 - `clone_snapshot`  
   Optional snapshot name to use when cloning from the template.
+- `vm_memory_mb`  
+  Optional memory override for cloned VMs in MiB. When unset, the template memory is used.
+- `vm_cpu_cores`  
+  Optional vCPU core override for cloned VMs. When unset, the template CPU count is used.
+- `vm_disk_mb`  
+  Optional absolute disk size override for the cloned VM primary disk in MiB. The value must not be smaller than the template disk.
+- `vm_disk_device`  
+  Optional Proxmox disk device name used for `vm_disk_mb`, for example `scsi0`. When unset, the plugin uses `bootdisk` from the template and falls back to common primary disk names.
 - `node_reserve_memory_mb`  
   Minimum free memory that must remain on the selected node after placement.
 - `node_reserve_cpu_cores`  
@@ -212,7 +220,7 @@ Minimal shape:
     token_secret = "REDACTED"
     cluster_name = "prod-pve"
     pool = "gitlab-ci"
-    template_vmid = 9000
+    template_vmids = [9000]
     name_prefix = "glr"
     vmid_range = "500000-500999"
     nodes = ["pve01", "pve02"]

@@ -23,3 +23,7 @@ func (l *Limiter) Do(ctx context.Context, fn func(context.Context) error) error 
 
 	return fn(ctx)
 }
+
+func (l *Limiter) Capacity() int {
+	return cap(l.sem)
+}

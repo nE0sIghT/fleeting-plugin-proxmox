@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"path"
+	"strings"
 
 	"github.com/hashicorp/go-hclog"
 	"golang.org/x/crypto/ssh"
@@ -35,7 +36,7 @@ type InstanceGroup struct {
 }
 
 func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings provider.Settings) (provider.ProviderInfo, error) {
-	g.log = log.With("cluster", g.ClusterName, "pool", g.Pool, "template_vmid", g.TemplateVMID)
+	g.log = log.With("cluster", g.ClusterName, "pool", g.Pool, "template_vmids", fmt.Sprintf("%v", g.TemplateVMIDs))
 	g.settings = settings
 
 	if err := g.config().validate(g.settings); err != nil {
@@ -86,7 +87,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		instancegroup.Config{
 			ClusterName:           g.ClusterName,
 			Pool:                  g.Pool,
-			TemplateVMID:          g.TemplateVMID,
+			TemplateVMIDs:         g.TemplateVMIDs,
 			VMIDMin:               g.parsedVMIDRange.Min,
 			VMIDMax:               g.parsedVMIDRange.Max,
 			NamePrefix:            g.NamePrefix,
@@ -94,6 +95,10 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 			CloneMode:             g.CloneMode,
 			TargetStorages:        g.TargetStorages,
 			CloneSnapshot:         g.CloneSnapshot,
+			VMMemoryMB:            g.VMMemoryMB,
+			VMCPUCores:            g.VMCPUCores,
+			VMDiskMB:              g.VMDiskMB,
+			VMDiskDevice:          g.VMDiskDevice,
 			MandatoryTags:         g.mandatoryTags(),
 			DescriptionTemplate:   g.DescriptionTemplate,
 			CloudInitInterface:    g.CloudInitInterface,
@@ -216,7 +221,7 @@ func generateSSHKeyPair() (string, []byte, error) {
 	}
 
 	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
-	return string(ssh.MarshalAuthorizedKey(sshPub)), privatePEM, nil
+	return ensureSSHKeyComment(string(ssh.MarshalAuthorizedKey(sshPub))), privatePEM, nil
 }
 
 func publicKeyFromPrivate(privateKey []byte) (string, error) {
@@ -224,5 +229,21 @@ func publicKeyFromPrivate(privateKey []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse private key: %w", err)
 	}
-	return string(ssh.MarshalAuthorizedKey(signer.PublicKey())), nil
+	return ensureSSHKeyComment(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))), nil
+}
+
+func ensureSSHKeyComment(publicKey string) string {
+	publicKey = strings.TrimSpace(publicKey)
+	if publicKey == "" {
+		return publicKey
+	}
+
+	fields := strings.Fields(publicKey)
+	if len(fields) < 2 {
+		return publicKey
+	}
+	if len(fields) >= 3 {
+		return publicKey + "\n"
+	}
+	return publicKey + " gitlab-runner@fleeting-proxmox\n"
 }

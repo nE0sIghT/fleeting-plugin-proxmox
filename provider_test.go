@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -28,26 +29,70 @@ type mockVM struct {
 	Status   string
 	IPConfig string
 	DHCPIP   string
+	BootDisk string
+	DiskDef  string
+	MemoryMB int64
+	CPUCores int
+	DiskMB   int64
 }
 
 type mockProxmox struct {
-	mu        sync.Mutex
-	template  mockVM
-	vms       map[int]mockVM
-	taskNode  map[string]string
-	failClone bool
+	mu          sync.Mutex
+	template    mockVM
+	vms         map[int]mockVM
+	taskNode    map[string]string
+	failClone   bool
+	rootFSUsed  int64
+	rootFSTotal int64
+	storages    []map[string]any
+	storageCfgs map[string]map[string]any
 }
 
 func newMockProxmox() *mockProxmox {
 	return &mockProxmox{
 		template: mockVM{
-			Node:   "node1",
-			VMID:   9000,
-			Name:   "runner-template",
-			Status: "stopped",
+			Node:     "node1",
+			VMID:     9000,
+			Name:     "runner-template",
+			Status:   "stopped",
+			BootDisk: "scsi0",
+			DiskDef:  "ceph-vm:vm-9000-disk-0,size=10G",
+			MemoryMB: 2048,
+			CPUCores: 2,
+			DiskMB:   10 * 1024,
 		},
-		vms:      map[int]mockVM{},
-		taskNode: map[string]string{},
+		vms:         map[int]mockVM{},
+		taskNode:    map[string]string{},
+		rootFSUsed:  int64(50 * 1024 * 1024 * 1024),
+		rootFSTotal: int64(500 * 1024 * 1024 * 1024),
+		storages: []map[string]any{
+			{
+				"type":    "storage",
+				"node":    "node1",
+				"storage": "local-lvm",
+				"disk":    int64(300 * 1024 * 1024 * 1024),
+				"maxdisk": int64(500 * 1024 * 1024 * 1024),
+				"shared":  0,
+			},
+			{
+				"type":    "storage",
+				"node":    "node1",
+				"storage": "ceph-vm",
+				"disk":    int64(100 * 1024 * 1024 * 1024),
+				"maxdisk": int64(500 * 1024 * 1024 * 1024),
+				"shared":  1,
+			},
+		},
+		storageCfgs: map[string]map[string]any{
+			"local-lvm": {
+				"storage": "local-lvm",
+				"nodes":   []string{"node1"},
+			},
+			"ceph-vm": {
+				"storage": "ceph-vm",
+				"nodes":   []string{"node1"},
+			},
+		},
 	}
 }
 
@@ -68,6 +113,12 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 		case r.URL.Path == "/api2/json/pools/ci":
 			write(map[string]any{"poolid": "ci"})
 			return
+		case strings.HasPrefix(r.URL.Path, "/api2/json/storage/"):
+			storage := path.Base(r.URL.Path)
+			cfg, ok := m.storageCfgs[storage]
+			require.True(t, ok, "unexpected storage config request for %s", storage)
+			write(cfg)
+			return
 		case r.URL.Path == "/api2/json/cluster/resources":
 			var out []map[string]any
 			out = append(out, map[string]any{
@@ -77,28 +128,11 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 				"name":     m.template.Name,
 				"template": 1,
 				"status":   m.template.Status,
-				"maxmem":   int64(2 * 1024 * 1024 * 1024),
-				"maxdisk":  int64(10 * 1024 * 1024 * 1024),
-				"maxcpu":   2,
+				"maxmem":   m.template.MemoryMB * 1024 * 1024,
+				"maxdisk":  m.template.DiskMB * 1024 * 1024,
+				"maxcpu":   m.template.CPUCores,
 			})
-			out = append(out,
-				map[string]any{
-					"type":    "storage",
-					"node":    "node1",
-					"storage": "local-lvm",
-					"disk":    int64(300 * 1024 * 1024 * 1024),
-					"maxdisk": int64(500 * 1024 * 1024 * 1024),
-					"shared":  0,
-				},
-				map[string]any{
-					"type":    "storage",
-					"node":    "node1",
-					"storage": "ceph-vm",
-					"disk":    int64(100 * 1024 * 1024 * 1024),
-					"maxdisk": int64(500 * 1024 * 1024 * 1024),
-					"shared":  1,
-				},
-			)
+			out = append(out, m.storages...)
 			for _, vm := range m.vms {
 				out = append(out, map[string]any{
 					"type":    "qemu",
@@ -108,14 +142,14 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 					"pool":    vm.Pool,
 					"tags":    vm.Tags,
 					"status":  vm.Status,
-					"maxmem":  int64(2 * 1024 * 1024 * 1024),
-					"maxdisk": int64(10 * 1024 * 1024 * 1024),
-					"maxcpu":  2,
+					"maxmem":  vm.MemoryMB * 1024 * 1024,
+					"maxdisk": vm.DiskMB * 1024 * 1024,
+					"maxcpu":  vm.CPUCores,
 				})
 			}
 			write(out)
 			return
-		case r.URL.Path == "/api2/json/nodes/node1/status":
+		case r.URL.Path == "/api2/json/nodes/node1/status" || r.URL.Path == "/api2/json/nodes/node2/status":
 			write(map[string]any{
 				"cpu": 0.1,
 				"cpuinfo": map[string]any{
@@ -126,8 +160,8 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 					"total": int64(32 * 1024 * 1024 * 1024),
 				},
 				"rootfs": map[string]any{
-					"used":  int64(50 * 1024 * 1024 * 1024),
-					"total": int64(500 * 1024 * 1024 * 1024),
+					"used":  m.rootFSUsed,
+					"total": m.rootFSTotal,
 				},
 			})
 			return
@@ -141,29 +175,60 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 				return
 			}
 			m.vms[vmid] = mockVM{
-				Node:    r.PostForm.Get("target"),
-				VMID:    vmid,
-				Name:    r.PostForm.Get("name"),
-				Pool:    r.PostForm.Get("pool"),
-				Storage: r.PostForm.Get("storage"),
-				Status:  "stopped",
-				DHCPIP:  fmt.Sprintf("10.10.30.%d", 100+(vmid%50)),
+				Node:     r.PostForm.Get("target"),
+				VMID:     vmid,
+				Name:     r.PostForm.Get("name"),
+				Pool:     r.PostForm.Get("pool"),
+				Storage:  r.PostForm.Get("storage"),
+				Status:   "stopped",
+				DHCPIP:   fmt.Sprintf("10.10.30.%d", 100+(vmid%50)),
+				BootDisk: m.template.BootDisk,
+				DiskDef:  m.template.DiskDef,
+				MemoryMB: m.template.MemoryMB,
+				CPUCores: m.template.CPUCores,
+				DiskMB:   m.template.DiskMB,
 			}
 			m.taskNode["UPID:clone"] = "node1"
 			write("UPID:clone")
 			return
-		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/node1/qemu/") && strings.HasSuffix(r.URL.Path, "/config"):
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/config"):
 			require.NoError(t, r.ParseForm())
 			vmid := extractVMID(r.URL.Path)
 			vm := m.vms[vmid]
-			vm.Pool = r.PostForm.Get("pool")
+			if value := r.PostForm.Get("pool"); value != "" {
+				vm.Pool = value
+			}
 			vm.Tags = r.PostForm.Get("tags")
 			vm.IPConfig = r.PostForm.Get("ipconfig0")
+			if value := r.PostForm.Get("memory"); value != "" {
+				parsed, parseErr := strconv.ParseInt(value, 10, 64)
+				require.NoError(t, parseErr)
+				vm.MemoryMB = parsed
+			}
+			if value := r.PostForm.Get("cores"); value != "" {
+				parsed, parseErr := strconv.Atoi(value)
+				require.NoError(t, parseErr)
+				vm.CPUCores = parsed
+			}
 			m.vms[vmid] = vm
 			m.taskNode["UPID:config"] = "node1"
 			write("UPID:config")
 			return
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/status/start"):
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/resize"):
+			require.NoError(t, r.ParseForm())
+			vmid := extractVMID(r.URL.Path)
+			vm := m.vms[vmid]
+			require.Equal(t, vm.BootDisk, r.PostForm.Get("disk"))
+			sizeValue := strings.TrimSuffix(r.PostForm.Get("size"), "M")
+			parsed, parseErr := strconv.ParseInt(sizeValue, 10, 64)
+			require.NoError(t, parseErr)
+			vm.DiskMB = parsed
+			vm.DiskDef = fmt.Sprintf("%s:vm-%d-disk-0,size=%dM", vm.Storage, vmid, vm.DiskMB)
+			m.vms[vmid] = vm
+			m.taskNode["UPID:resize"] = "node1"
+			write("UPID:resize")
+			return
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/status/start"):
 			vmid := extractVMID(r.URL.Path)
 			vm := m.vms[vmid]
 			vm.Status = "running"
@@ -171,39 +236,52 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 			m.taskNode["UPID:start"] = "node1"
 			write("UPID:start")
 			return
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/status/shutdown"):
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/status/stop"):
 			vmid := extractVMID(r.URL.Path)
 			vm := m.vms[vmid]
 			vm.Status = "stopped"
 			m.vms[vmid] = vm
-			m.taskNode["UPID:shutdown"] = "node1"
-			write("UPID:shutdown")
+			m.taskNode["UPID:stop"] = "node1"
+			write("UPID:stop")
 			return
-		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/node1/qemu/"):
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/"):
 			vmid := extractVMID(r.URL.Path)
 			delete(m.vms, vmid)
 			m.taskNode["UPID:delete"] = "node1"
 			write("UPID:delete")
 			return
-		case strings.HasPrefix(r.URL.Path, "/api2/json/nodes/node1/tasks/") && strings.HasSuffix(r.URL.Path, "/status"):
+		case strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/tasks/") && strings.HasSuffix(r.URL.Path, "/status"):
 			write(map[string]any{"status": "stopped", "exitstatus": "OK"})
 			return
-		case strings.HasPrefix(r.URL.Path, "/api2/json/nodes/node1/qemu/") && strings.HasSuffix(r.URL.Path, "/config"):
+		case strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/config"):
 			vmid := extractVMID(r.URL.Path)
+			if vmid == m.template.VMID {
+				write(map[string]any{
+					"name":      m.template.Name,
+					"pool":      m.template.Pool,
+					"tags":      m.template.Tags,
+					"bootdisk":  m.template.BootDisk,
+					"scsi0":     m.template.DiskDef,
+					"ipconfig0": m.template.IPConfig,
+				})
+				return
+			}
 			vm := m.vms[vmid]
 			write(map[string]any{
 				"name":      vm.Name,
 				"pool":      vm.Pool,
 				"tags":      vm.Tags,
 				"ipconfig0": vm.IPConfig,
+				"bootdisk":  vm.BootDisk,
+				"scsi0":     vm.DiskDef,
 			})
 			return
-		case strings.HasPrefix(r.URL.Path, "/api2/json/nodes/node1/qemu/") && strings.HasSuffix(r.URL.Path, "/status/current"):
+		case strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/status/current"):
 			vmid := extractVMID(r.URL.Path)
 			vm := m.vms[vmid]
 			write(map[string]any{"status": vm.Status, "qmpstatus": vm.Status})
 			return
-		case strings.HasPrefix(r.URL.Path, "/api2/json/nodes/node1/qemu/") && strings.HasSuffix(r.URL.Path, "/agent/network-get-interfaces"):
+		case strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/agent/network-get-interfaces"):
 			vmid := extractVMID(r.URL.Path)
 			vm := m.vms[vmid]
 			ip := vm.DHCPIP
@@ -251,7 +329,7 @@ func TestProviderLifecycle(t *testing.T) {
 			group.TokenSecret = "secret"
 			group.ClusterName = "lab"
 			group.Pool = "ci"
-			group.TemplateVMID = 9000
+			group.TemplateVMIDs = []int{9000}
 			group.NamePrefix = "runner"
 			group.VMIDRange = "5000-5005"
 			group.Nodes = LaxStringList{"node1"}
@@ -259,7 +337,11 @@ func TestProviderLifecycle(t *testing.T) {
 			group.NetworkMode = tc.networkMode
 			group.StateFile = filepath.Join(t.TempDir(), "state.json")
 			group.CIUser = "ubuntu"
+			group.CloneMode = "full"
 			group.TargetStorages = LaxStringList{"local-lvm", "ceph-vm"}
+			group.VMMemoryMB = 4096
+			group.VMCPUCores = 4
+			group.VMDiskMB = 20 * 1024
 			if tc.networkMode == "static" {
 				group.IPPoolNetwork = "10.10.20.0/24"
 				group.IPPoolGateway = "10.10.20.1"
@@ -288,6 +370,9 @@ func TestProviderLifecycle(t *testing.T) {
 			require.Equal(t, tc.wantIP, connectInfo.InternalAddr)
 			require.Equal(t, "ubuntu", connectInfo.Username)
 			require.Equal(t, "ceph-vm", mock.vms[5000].Storage)
+			require.Equal(t, int64(4096), mock.vms[5000].MemoryMB)
+			require.Equal(t, 4, mock.vms[5000].CPUCores)
+			require.Equal(t, int64(20*1024), mock.vms[5000].DiskMB)
 
 			deleted, err := group.Decrease(context.Background(), ids)
 			require.NoError(t, err)
@@ -320,7 +405,7 @@ func TestCloneRollbackDoesNotDeleteForeignVM(t *testing.T) {
 	group.TokenSecret = "secret"
 	group.ClusterName = "lab"
 	group.Pool = "ci"
-	group.TemplateVMID = 9000
+	group.TemplateVMIDs = []int{9000}
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
@@ -339,6 +424,219 @@ func TestCloneRollbackDoesNotDeleteForeignVM(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "foreign-vm", foreign.Name)
 	require.Equal(t, "foreign-pool", foreign.Pool)
+}
+
+func TestTargetStoragePlacementIgnoresNodeRootFS(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.rootFSUsed = int64(499 * 1024 * 1024 * 1024)
+	mock.rootFSTotal = int64(500 * 1024 * 1024 * 1024)
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node1"}
+	group.CloudInitEnabled = true
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"ceph-vm"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+
+	count, err := group.Increase(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Equal(t, "ceph-vm", mock.vms[5000].Storage)
+}
+
+func TestTargetStorageMustExistOnSelectedNode(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.storages = []map[string]any{
+		{
+			"type":    "storage",
+			"node":    "",
+			"storage": "ceph-vm",
+			"disk":    int64(100 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  1,
+		},
+	}
+	mock.storageCfgs["ceph-vm"] = map[string]any{
+		"storage": "ceph-vm",
+		"nodes":   []string{"node2"},
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node1"}
+	group.CloudInitEnabled = true
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"ceph-vm"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+
+	_, err = group.Increase(context.Background(), 1)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no eligible nodes satisfy configured headroom")
+}
+
+func TestInitFailsWhenNodeHasNoLocalTemplateAndNoSharedTargetStorage(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.storages = append(mock.storages, map[string]any{
+		"type":    "storage",
+		"node":    "node2",
+		"storage": "fast-local",
+		"disk":    int64(50 * 1024 * 1024 * 1024),
+		"maxdisk": int64(500 * 1024 * 1024 * 1024),
+		"shared":  0,
+	})
+	mock.storageCfgs["fast-local"] = map[string]any{
+		"storage": "fast-local",
+		"nodes":   []string{"node2"},
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node2"}
+	group.CloudInitEnabled = true
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"fast-local"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "node node2 has no usable template")
+}
+
+func TestSharedTemplateFallbackUsesFullCloneOnSharedTemplateStorage(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.storages = []map[string]any{
+		{
+			"type":    "storage",
+			"node":    "",
+			"storage": "ceph-vm",
+			"disk":    int64(100 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  1,
+		},
+	}
+	mock.storageCfgs["ceph-vm"] = map[string]any{
+		"storage": "ceph-vm",
+		"nodes":   []string{"node1", "node2"},
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node2"}
+	group.CloudInitEnabled = true
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"ceph-vm"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+
+	count, err := group.Increase(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Equal(t, "node2", mock.vms[5000].Node)
+	require.Equal(t, "ceph-vm", mock.vms[5000].Storage)
+}
+
+func TestLinkedCloneModeFailsInitWithoutLocalTemplate(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.storages = []map[string]any{
+		{
+			"type":    "storage",
+			"node":    "",
+			"storage": "ceph-vm",
+			"disk":    int64(100 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  1,
+		},
+	}
+	mock.storageCfgs["ceph-vm"] = map[string]any{
+		"storage": "ceph-vm",
+		"nodes":   []string{"node1", "node2"},
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node2"}
+	group.CloudInitEnabled = true
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "linked"
+	group.TargetStorages = LaxStringList{"ceph-vm"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "clone_mode=linked requires a local template")
 }
 
 func extractVMID(path string) int {
