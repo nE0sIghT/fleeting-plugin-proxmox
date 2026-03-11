@@ -76,6 +76,8 @@ type Group struct {
 	mu sync.Mutex
 	// transient overrides smooth out state transitions while long-running Proxmox tasks complete.
 	transient       map[string]provider.State
+	pendingByNode   map[string]pendingReservation
+	pendingVMIDs    map[int]struct{}
 	templatesByNode map[string]templateChoice
 	templateSizing  proxmoxclient.ClusterResource
 	templateDisk    string
@@ -90,6 +92,13 @@ type provisionPlan struct {
 	Node            string
 	TargetStorage   string
 	VMID            int
+	Requirement     scheduler.Requirement
+}
+
+type pendingReservation struct {
+	MemoryMB  float64
+	CPUCores  float64
+	StorageGB map[string]float64
 }
 
 type nodePlanState struct {
@@ -121,6 +130,8 @@ func New(client *proxmoxclient.Client, log hclog.Logger, cfg Config, pool *ippoo
 		startLimiter:  startLimiter,
 		deleteLimiter: deleteLimiter,
 		transient:     map[string]provider.State{},
+		pendingByNode: map[string]pendingReservation{},
+		pendingVMIDs:  map[int]struct{}{},
 	}
 }
 
@@ -245,6 +256,7 @@ func (g *Group) Increase(ctx context.Context, delta int) ([]string, error) {
 			defer wg.Done()
 			for plan := range jobs {
 				id, err := g.provisionOne(ctx, plan)
+				g.releasePendingPlan(plan)
 				results <- result{id: id, err: err}
 			}
 		}()
@@ -462,10 +474,14 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 		req.DiskGB = 0
 	}
 
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	vmids, vmidErr := g.allocateVMIDs(vmResources, delta)
 	if len(vmids) == 0 && vmidErr != nil {
 		return nil, vmidErr
 	}
+	g.applyPendingReservations(states)
 	plans := make([]provisionPlan, 0, len(vmids))
 	var errs []error
 	if vmidErr != nil {
@@ -510,9 +526,12 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 			Node:            targetNode.Name,
 			TargetStorage:   targetNode.TargetStorage,
 			VMID:            vmid,
+			Requirement:     req,
 		})
 		g.reservePlannedResources(states, targetNode, req)
 	}
+
+	g.registerPendingPlans(plans)
 
 	return plans, errors.Join(errs...)
 }
@@ -1008,6 +1027,66 @@ func (g *Group) reservePlannedResources(states []nodePlanState, node scheduler.N
 	}
 }
 
+func (g *Group) applyPendingReservations(states []nodePlanState) {
+	for i := range states {
+		pending, ok := g.pendingByNode[states[i].Name]
+		if !ok {
+			continue
+		}
+		states[i].FreeMemoryMB -= pending.MemoryMB
+		states[i].FreeCPUCores -= pending.CPUCores
+		for storage, reserved := range pending.StorageGB {
+			states[i].StorageFreeGB[storage] -= reserved
+		}
+	}
+}
+
+func (g *Group) registerPendingPlans(plans []provisionPlan) {
+	for _, plan := range plans {
+		pending := g.pendingByNode[plan.Node]
+		pending.MemoryMB += plan.Requirement.MemoryMB
+		pending.CPUCores += plan.Requirement.CPUCores
+		if plan.TargetStorage != "" && plan.Requirement.DiskGB > 0 {
+			if pending.StorageGB == nil {
+				pending.StorageGB = map[string]float64{}
+			}
+			pending.StorageGB[plan.TargetStorage] += plan.Requirement.DiskGB
+		}
+		g.pendingByNode[plan.Node] = pending
+		g.pendingVMIDs[plan.VMID] = struct{}{}
+	}
+}
+
+func (g *Group) releasePendingPlan(plan provisionPlan) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	pending, ok := g.pendingByNode[plan.Node]
+	if ok {
+		pending.MemoryMB -= plan.Requirement.MemoryMB
+		if pending.MemoryMB < 0 {
+			pending.MemoryMB = 0
+		}
+		pending.CPUCores -= plan.Requirement.CPUCores
+		if pending.CPUCores < 0 {
+			pending.CPUCores = 0
+		}
+		if plan.TargetStorage != "" && pending.StorageGB != nil {
+			pending.StorageGB[plan.TargetStorage] -= plan.Requirement.DiskGB
+			if pending.StorageGB[plan.TargetStorage] <= 0 {
+				delete(pending.StorageGB, plan.TargetStorage)
+			}
+		}
+		if pending.MemoryMB == 0 && pending.CPUCores == 0 && len(pending.StorageGB) == 0 {
+			delete(g.pendingByNode, plan.Node)
+		} else {
+			g.pendingByNode[plan.Node] = pending
+		}
+	}
+
+	delete(g.pendingVMIDs, plan.VMID)
+}
+
 func storageAllowsNode(config proxmoxclient.StorageConfig, node string) bool {
 	if len(config.Nodes) == 0 {
 		return true
@@ -1335,6 +1414,9 @@ func (g *Group) allocateVMIDs(resources []proxmoxclient.ClusterResource, count i
 		if resource.VMID > 0 {
 			used[resource.VMID] = struct{}{}
 		}
+	}
+	for vmid := range g.pendingVMIDs {
+		used[vmid] = struct{}{}
 	}
 	vmids := make([]int, 0, count)
 	for vmid := g.cfg.VMIDMin; vmid <= g.cfg.VMIDMax; vmid++ {
