@@ -1401,17 +1401,6 @@ func (g *Group) findTemplates(resources []proxmoxclient.ClusterResource) ([]prox
 	return templates, nil
 }
 
-func (g *Group) allocateVMID(resources []proxmoxclient.ClusterResource) (int, error) {
-	vmids, err := g.allocateVMIDs(resources, 1)
-	if err != nil && len(vmids) == 0 {
-		return 0, err
-	}
-	if len(vmids) == 0 {
-		return 0, fmt.Errorf("no free VMID in configured range")
-	}
-	return vmids[0], err
-}
-
 func (g *Group) allocateVMIDs(resources []proxmoxclient.ClusterResource, count int) ([]int, error) {
 	used := map[int]struct{}{}
 	for _, resource := range resources {

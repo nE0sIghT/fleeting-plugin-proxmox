@@ -123,41 +123,6 @@ type PoolInfo struct {
 	PoolID string `json:"poolid"`
 }
 
-type StringList []string
-
-func (o *StringList) UnmarshalJSON(data []byte) error {
-	var one string
-	if err := json.Unmarshal(data, &one); err == nil {
-		if strings.Contains(one, ",") {
-			parts := strings.Split(one, ",")
-			values := make([]string, 0, len(parts))
-			for _, part := range parts {
-				part = strings.TrimSpace(part)
-				if part != "" {
-					values = append(values, part)
-				}
-			}
-			*o = values
-			return nil
-		}
-		*o = []string{strings.TrimSpace(one)}
-		return nil
-	}
-
-	var many []string
-	if err := json.Unmarshal(data, &many); err == nil {
-		*o = many
-		return nil
-	}
-
-	return fmt.Errorf("invalid string list: %s", string(data))
-}
-
-type StorageConfig struct {
-	Storage string     `json:"storage"`
-	Nodes   StringList `json:"nodes"`
-}
-
 type AgentInterface struct {
 	Name        string           `json:"name"`
 	IPAddresses []AgentIPAddress `json:"ip-addresses"`
@@ -233,12 +198,6 @@ func (c *Client) GetVersion(ctx context.Context) (Version, error) {
 func (c *Client) GetPool(ctx context.Context, pool string) (PoolInfo, error) {
 	var out PoolInfo
 	err := c.get(ctx, path.Join("/pools", pool), &out)
-	return out, err
-}
-
-func (c *Client) GetStorageConfig(ctx context.Context, storage string) (StorageConfig, error) {
-	var out StorageConfig
-	err := c.get(ctx, path.Join("/storage", storage), &out)
 	return out, err
 }
 
@@ -345,14 +304,6 @@ func (c *Client) ResizeVMDisk(ctx context.Context, node string, vmid int, disk s
 
 func (c *Client) StartVM(ctx context.Context, node string, vmid int) (string, error) {
 	return c.postString(ctx, path.Join("/nodes", node, "qemu", fmt.Sprintf("%d", vmid), "status", "start"), nil)
-}
-
-func (c *Client) ShutdownVM(ctx context.Context, node string, vmid int, timeout time.Duration) (string, error) {
-	form := url.Values{}
-	if timeout > 0 {
-		form.Set("timeout", fmt.Sprintf("%d", int(timeout.Seconds())))
-	}
-	return c.postString(ctx, path.Join("/nodes", node, "qemu", fmt.Sprintf("%d", vmid), "status", "shutdown"), form)
 }
 
 func (c *Client) StopVM(ctx context.Context, node string, vmid int) (string, error) {
