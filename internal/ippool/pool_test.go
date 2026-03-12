@@ -71,3 +71,31 @@ func TestPoolRespectsReuseCooldown(t *testing.T) {
 	_, err = pool.Acquire(ctx, "node1/101")
 	require.Error(t, err)
 }
+
+func TestPoolForgetRemovesLeaseImmediately(t *testing.T) {
+	t.Parallel()
+
+	store := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	pool, err := New(Config{
+		Prefix:        netip.MustParsePrefix("10.0.2.0/30"),
+		Gateway:       netip.MustParseAddr("10.0.2.1"),
+		Ranges:        []string{"10.0.2.2-10.0.2.2"},
+		ReuseCooldown: time.Hour,
+	}, store)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	lease, err := pool.Acquire(ctx, "node1/100")
+	require.NoError(t, err)
+	require.Equal(t, "10.0.2.2", lease.IP.String())
+
+	require.NoError(t, pool.Forget(ctx, "node1/100"))
+
+	snapshot, err := store.Read(ctx)
+	require.NoError(t, err)
+	require.Empty(t, snapshot.Leases)
+
+	lease, err = pool.Acquire(ctx, "node1/101")
+	require.NoError(t, err)
+	require.Equal(t, "10.0.2.2", lease.IP.String())
+}

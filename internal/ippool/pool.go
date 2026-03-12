@@ -108,6 +108,22 @@ func (p *Pool) Release(ctx context.Context, key string) error {
 	})
 }
 
+func (p *Pool) Forget(ctx context.Context, key string) error {
+	if key == "" {
+		return nil
+	}
+
+	return p.store.Update(ctx, func(snapshot *state.Snapshot) error {
+		for ip, record := range snapshot.Leases {
+			if record.Key != key {
+				continue
+			}
+			delete(snapshot.Leases, ip)
+		}
+		return nil
+	})
+}
+
 func (p *Pool) Reconcile(ctx context.Context, active map[string]netip.Addr) error {
 	return p.store.Update(ctx, func(snapshot *state.Snapshot) error {
 		now := time.Now()

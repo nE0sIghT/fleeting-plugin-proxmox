@@ -52,13 +52,13 @@ type pluginConfig struct {
 	VMDiskMB       int64         `json:"vm_disk_mb"`
 	VMDiskDevice   string        `json:"vm_disk_device"`
 
-	NodeReserveMemoryMB int64  `json:"node_reserve_memory_mb"`
-	NodeReserveMemoryPercent int `json:"node_reserve_memory_percent"`
-	NodeReserveCPUCores int    `json:"node_reserve_cpu_cores"`
-	NodeReserveCPUPercent int  `json:"node_reserve_cpu_percent"`
-	NodeReserveDiskGB   int64  `json:"node_reserve_disk_gb"`
-	NodeReserveDiskPercent int `json:"node_reserve_disk_percent"`
-	Scheduler           string `json:"scheduler"`
+	NodeReserveMemoryMB      int64  `json:"node_reserve_memory_mb"`
+	NodeReserveMemoryPercent int    `json:"node_reserve_memory_percent"`
+	NodeReserveCPUCores      int    `json:"node_reserve_cpu_cores"`
+	NodeReserveCPUPercent    int    `json:"node_reserve_cpu_percent"`
+	NodeReserveDiskGB        int64  `json:"node_reserve_disk_gb"`
+	NodeReserveDiskPercent   int    `json:"node_reserve_disk_percent"`
+	Scheduler                string `json:"scheduler"`
 
 	MaxParallelClones  int `json:"max_parallel_clones"`
 	MaxParallelStarts  int `json:"max_parallel_starts"`
@@ -147,7 +147,7 @@ func (c *pluginConfig) applyDefaults(settings provider.Settings) {
 		c.CloudInitInterface = defaultCloudInitIFace
 	}
 	if c.StateFile == "" {
-		c.StateFile = filepath.Join(os.TempDir(), Version.Name, defaultStateFileBasename)
+		c.StateFile = filepath.Join(os.TempDir(), Version.Name, defaultStateFileName(c.ClusterName, c.Pool, c.NamePrefix))
 	}
 	if !c.CloudInitEnabled {
 		c.CloudInitEnabled = true
@@ -351,6 +351,24 @@ func parseDurationField(name, value string, errs *[]error) time.Duration {
 		*errs = append(*errs, fmt.Errorf("invalid %s: %w", name, err))
 	}
 	return d
+}
+
+func defaultStateFileName(clusterName, pool, namePrefix string) string {
+	parts := []string{
+		sanitizeTag(clusterName),
+		sanitizeTag(pool),
+		sanitizeTag(namePrefix),
+	}
+	filtered := parts[:0]
+	for _, part := range parts {
+		if part != "" {
+			filtered = append(filtered, part)
+		}
+	}
+	if len(filtered) == 0 {
+		return defaultStateFileBasename
+	}
+	return strings.Join(append(filtered, defaultStateFileBasename), "-")
 }
 
 func overrideEnv(dst *string, key string) {

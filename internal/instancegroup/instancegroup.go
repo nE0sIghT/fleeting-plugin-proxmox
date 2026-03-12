@@ -562,7 +562,8 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 		defer cancel()
 		_ = g.safeDestroyProvisioningVM(cleanupCtx, plan.Node, plan.VMID, fmt.Sprintf("%s-%d", g.cfg.NamePrefix, plan.VMID))
 		if g.pool != nil {
-			_ = g.pool.Release(cleanupCtx, id)
+			// Failed provisioning must not leave leases behind or put them into reuse cooldown.
+			_ = g.pool.Forget(cleanupCtx, id)
 		}
 	}
 
