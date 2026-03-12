@@ -42,6 +42,7 @@ type mockProxmox struct {
 	vms         map[int]mockVM
 	taskNode    map[string]string
 	failClone   bool
+	downNodes   map[string]bool
 	rootFSUsed  int64
 	rootFSTotal int64
 	storages    []map[string]any
@@ -63,6 +64,7 @@ func newMockProxmox() *mockProxmox {
 		},
 		vms:         map[int]mockVM{},
 		taskNode:    map[string]string{},
+		downNodes:   map[string]bool{},
 		rootFSUsed:  int64(50 * 1024 * 1024 * 1024),
 		rootFSTotal: int64(500 * 1024 * 1024 * 1024),
 		storages: []map[string]any{
@@ -150,6 +152,12 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 			write(out)
 			return
 		case r.URL.Path == "/api2/json/nodes/node1/status" || r.URL.Path == "/api2/json/nodes/node2/status":
+			node := path.Base(path.Dir(r.URL.Path))
+			if m.downNodes[node] {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"data":null,"message":"node unavailable"}`))
+				return
+			}
 			write(map[string]any{
 				"cpu": 0.1,
 				"cpuinfo": map[string]any{
@@ -641,6 +649,135 @@ func TestLinkedCloneModeFailsInitWithoutLocalTemplate(t *testing.T) {
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "clone_mode=linked requires a local template")
+}
+
+func TestIncreaseSkipsUnavailableNodeAfterInit(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.storages = []map[string]any{
+		{
+			"type":    "storage",
+			"node":    "node1",
+			"storage": "local-lvm",
+			"disk":    int64(300 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+		{
+			"type":    "storage",
+			"node":    "node2",
+			"storage": "local-lvm",
+			"disk":    int64(300 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000, 9001}
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node1", "node2"}
+	group.CloudInitEnabled = true
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"local-lvm"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	mock.template = mockVM{
+		Node:     "node1",
+		VMID:     9000,
+		Name:     "runner-template-node1",
+		Status:   "stopped",
+		BootDisk: "scsi0",
+		DiskDef:  "local-lvm:vm-9000-disk-0,size=10G",
+		MemoryMB: 2048,
+		CPUCores: 2,
+		DiskMB:   10 * 1024,
+	}
+
+	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api2/json/cluster/resources" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{
+						"type":     "qemu",
+						"node":     "node1",
+						"vmid":     9000,
+						"name":     "runner-template-node1",
+						"template": 1,
+						"status":   "stopped",
+						"maxmem":   int64(2048 * 1024 * 1024),
+						"maxdisk":  int64(10 * 1024 * 1024 * 1024),
+						"maxcpu":   2,
+					},
+					{
+						"type":     "qemu",
+						"node":     "node2",
+						"vmid":     9001,
+						"name":     "runner-template-node2",
+						"template": 1,
+						"status":   "stopped",
+						"maxmem":   int64(2048 * 1024 * 1024),
+						"maxdisk":  int64(10 * 1024 * 1024 * 1024),
+						"maxcpu":   2,
+					},
+					{
+						"type":    "storage",
+						"node":    "node1",
+						"storage": "local-lvm",
+						"disk":    int64(300 * 1024 * 1024 * 1024),
+						"maxdisk": int64(500 * 1024 * 1024 * 1024),
+						"shared":  0,
+					},
+					{
+						"type":    "storage",
+						"node":    "node2",
+						"storage": "local-lvm",
+						"disk":    int64(300 * 1024 * 1024 * 1024),
+						"maxdisk": int64(500 * 1024 * 1024 * 1024),
+						"shared":  0,
+					},
+				},
+			})
+			return
+		}
+		if r.URL.Path == "/api2/json/nodes/node2/qemu/9001/config" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"name":      "runner-template-node2",
+					"bootdisk":  "scsi0",
+					"scsi0":     "local-lvm:vm-9001-disk-0,size=10G",
+					"ipconfig0": "",
+				},
+			})
+			return
+		}
+		mock.handler(t).ServeHTTP(w, r)
+	})
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+
+	mock.mu.Lock()
+	mock.downNodes["node2"] = true
+	mock.mu.Unlock()
+
+	count, err := group.Increase(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Equal(t, "node1", mock.vms[5000].Node)
 }
 
 func extractVMID(path string) int {

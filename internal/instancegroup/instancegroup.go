@@ -885,7 +885,9 @@ func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []pr
 
 		status, err := g.client.GetNodeStatus(ctx, node)
 		if err != nil {
-			return nil, nil, err
+			g.log.Warn("skipping unavailable node", "node", node, "error", err)
+			skipped = append(skipped, fmt.Sprintf("%s: unavailable", node))
+			continue
 		}
 
 		storageFree := map[string]float64{}
@@ -1296,27 +1298,6 @@ func (g *Group) provisionWorkerCount() int {
 		return 1
 	}
 	return workers
-}
-
-func (g *Group) isManagedConfig(node string, vmid int, config proxmoxclient.VMConfig) bool {
-	if vmid < g.cfg.VMIDMin || vmid > g.cfg.VMIDMax {
-		return false
-	}
-	if config.Template == 1 {
-		return false
-	}
-	if config.Pool != g.cfg.Pool {
-		return false
-	}
-
-	tagSet := parseTags(config.Tags)
-	for _, tag := range g.cfg.MandatoryTags {
-		if _, ok := tagSet[tag]; !ok {
-			return false
-		}
-	}
-
-	return true
 }
 
 func (g *Group) requiredMemoryMB() float64 {
