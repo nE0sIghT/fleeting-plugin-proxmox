@@ -80,11 +80,21 @@ type Group struct {
 	pendingVMIDs    map[int]struct{}
 	templatesByNode map[string]templateChoice
 	storageNodes    map[string]map[string]struct{}
+	storagePlugins  map[string]string
 	templateSizing  proxmoxclient.ClusterResource
 	templateDisk    string
 }
 
 var diskSizePattern = regexp.MustCompile(`(?:^|,)size=([0-9]+(?:\.[0-9]+)?)([KMGT])(?:,|$)`)
+var linkedClonePluginTypes = map[string]struct{}{
+	"dir":      {},
+	"nfs":      {},
+	"lvmthin":  {},
+	"zfspool":  {},
+	"rbd":      {},
+	"sheepdog": {},
+	"nexenta":  {},
+}
 
 type provisionPlan struct {
 	TemplateNode    string
@@ -175,6 +185,7 @@ func (g *Group) Init(ctx context.Context) error {
 		return err
 	}
 	g.storageNodes = indexStorageNodes(storageResources)
+	g.storagePlugins = indexStoragePlugins(storageResources)
 	g.templatesByNode = templatesByNode
 	g.templateSizing = templateSizing
 	g.templateDisk = templateDisk
@@ -701,11 +712,19 @@ func (g *Group) effectiveCloneMode(plan provisionPlan) string {
 	default:
 		if plan.TemplateNode == plan.Node {
 			if plan.TargetStorage == "" || plan.TargetStorage == plan.TemplateStorage {
-				return "linked"
+				if g.supportsLinkedClone(plan.TemplateStorage) {
+					return "linked"
+				}
 			}
 		}
 		return "full"
 	}
+}
+
+func (g *Group) supportsLinkedClone(storage string) bool {
+	pluginType := g.storagePlugins[storage]
+	_, ok := linkedClonePluginTypes[pluginType]
+	return ok
 }
 
 func (g *Group) deleteOne(ctx context.Context, id string) error {
@@ -1113,6 +1132,20 @@ func indexStorageNodes(resources []proxmoxclient.ClusterResource) map[string]map
 		nodes[resource.Node] = struct{}{}
 	}
 	return nodesByStorage
+}
+
+func indexStoragePlugins(resources []proxmoxclient.ClusterResource) map[string]string {
+	pluginsByStorage := make(map[string]string)
+	for _, resource := range resources {
+		if resource.Type != "storage" || resource.Storage == "" || resource.PluginType == "" {
+			continue
+		}
+		if _, exists := pluginsByStorage[resource.Storage]; exists {
+			continue
+		}
+		pluginsByStorage[resource.Storage] = resource.PluginType
+	}
+	return pluginsByStorage
 }
 
 func (g *Group) loadTemplateStorageNodes(ctx context.Context, templates []proxmoxclient.ClusterResource, storageResources []proxmoxclient.ClusterResource) (map[int]map[string]struct{}, error) {

@@ -37,16 +37,17 @@ type mockVM struct {
 }
 
 type mockProxmox struct {
-	mu          sync.Mutex
-	template    mockVM
-	vms         map[int]mockVM
-	taskNode    map[string]string
-	failClone   bool
-	downNodes   map[string]bool
-	rootFSUsed  int64
-	rootFSTotal int64
-	storages    []map[string]any
-	storageCfgs map[string]map[string]any
+	mu                       sync.Mutex
+	template                 mockVM
+	vms                      map[int]mockVM
+	taskNode                 map[string]string
+	failClone                bool
+	failLinkedCloneOnStorage map[string]bool
+	downNodes                map[string]bool
+	rootFSUsed               int64
+	rootFSTotal              int64
+	storages                 []map[string]any
+	storageCfgs              map[string]map[string]any
 }
 
 func newMockProxmox() *mockProxmox {
@@ -62,27 +63,30 @@ func newMockProxmox() *mockProxmox {
 			CPUCores: 2,
 			DiskMB:   10 * 1024,
 		},
-		vms:         map[int]mockVM{},
-		taskNode:    map[string]string{},
-		downNodes:   map[string]bool{},
-		rootFSUsed:  int64(50 * 1024 * 1024 * 1024),
-		rootFSTotal: int64(500 * 1024 * 1024 * 1024),
+		vms:                      map[int]mockVM{},
+		taskNode:                 map[string]string{},
+		failLinkedCloneOnStorage: map[string]bool{},
+		downNodes:                map[string]bool{},
+		rootFSUsed:               int64(50 * 1024 * 1024 * 1024),
+		rootFSTotal:              int64(500 * 1024 * 1024 * 1024),
 		storages: []map[string]any{
 			{
-				"type":    "storage",
-				"node":    "node1",
-				"storage": "local-lvm",
-				"disk":    int64(300 * 1024 * 1024 * 1024),
-				"maxdisk": int64(500 * 1024 * 1024 * 1024),
-				"shared":  0,
+				"type":       "storage",
+				"node":       "node1",
+				"storage":    "local-lvm",
+				"plugintype": "lvm",
+				"disk":       int64(300 * 1024 * 1024 * 1024),
+				"maxdisk":    int64(500 * 1024 * 1024 * 1024),
+				"shared":     0,
 			},
 			{
-				"type":    "storage",
-				"node":    "node1",
-				"storage": "ceph-vm",
-				"disk":    int64(100 * 1024 * 1024 * 1024),
-				"maxdisk": int64(500 * 1024 * 1024 * 1024),
-				"shared":  1,
+				"type":       "storage",
+				"node":       "node1",
+				"storage":    "ceph-vm",
+				"plugintype": "rbd",
+				"disk":       int64(100 * 1024 * 1024 * 1024),
+				"maxdisk":    int64(500 * 1024 * 1024 * 1024),
+				"shared":     1,
 			},
 		},
 		storageCfgs: map[string]map[string]any{
@@ -180,6 +184,11 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 			if m.failClone {
 				w.WriteHeader(http.StatusInternalServerError)
 				write("clone failed")
+				return
+			}
+			if m.failLinkedCloneOnStorage[r.PostForm.Get("storage")] && r.PostForm.Get("full") == "0" {
+				w.WriteHeader(http.StatusInternalServerError)
+				write("Linked clone feature is not supported")
 				return
 			}
 			m.vms[vmid] = mockVM{
@@ -649,6 +658,51 @@ func TestLinkedCloneModeFailsInitWithoutLocalTemplate(t *testing.T) {
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "clone_mode=linked requires a local template")
+}
+
+func TestAutoCloneModeFallsBackToFullForUnsupportedStoragePluginType(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.template = mockVM{
+		Node:     "node1",
+		VMID:     9000,
+		Name:     "runner-template",
+		Status:   "stopped",
+		BootDisk: "virtio0",
+		DiskDef:  "local-lvm:vm-9000-disk-0,size=10G",
+		MemoryMB: 2048,
+		CPUCores: 2,
+		DiskMB:   10 * 1024,
+	}
+	mock.failLinkedCloneOnStorage["local-lvm"] = true
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node1"}
+	group.CloudInitEnabled = true
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "auto"
+	group.TargetStorages = LaxStringList{"local-lvm"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+
+	count, err := group.Increase(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Equal(t, "local-lvm", mock.vms[5000].Storage)
 }
 
 func TestIncreaseSkipsUnavailableNodeAfterInit(t *testing.T) {

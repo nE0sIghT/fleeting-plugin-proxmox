@@ -42,22 +42,23 @@ type Version struct {
 }
 
 type ClusterResource struct {
-	ID       string  `json:"id"`
-	Type     string  `json:"type"`
-	Pool     string  `json:"pool"`
-	Node     string  `json:"node"`
-	Name     string  `json:"name"`
-	Storage  string  `json:"storage"`
-	Tags     string  `json:"tags"`
-	Status   string  `json:"status"`
-	Template int     `json:"template"`
-	Shared   int     `json:"shared"`
-	VMID     int     `json:"vmid"`
-	Disk     int64   `json:"disk"`
-	MaxMem   int64   `json:"maxmem"`
-	MaxDisk  int64   `json:"maxdisk"`
-	MaxCPU   float64 `json:"maxcpu"`
-	CPU      float64 `json:"cpu"`
+	ID         string  `json:"id"`
+	Type       string  `json:"type"`
+	PluginType string  `json:"plugintype"`
+	Pool       string  `json:"pool"`
+	Node       string  `json:"node"`
+	Name       string  `json:"name"`
+	Storage    string  `json:"storage"`
+	Tags       string  `json:"tags"`
+	Status     string  `json:"status"`
+	Template   int     `json:"template"`
+	Shared     int     `json:"shared"`
+	VMID       int     `json:"vmid"`
+	Disk       int64   `json:"disk"`
+	MaxMem     int64   `json:"maxmem"`
+	MaxDisk    int64   `json:"maxdisk"`
+	MaxCPU     float64 `json:"maxcpu"`
+	CPU        float64 `json:"cpu"`
 }
 
 type NodeStatus struct {
