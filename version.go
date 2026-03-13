@@ -5,9 +5,9 @@ import "gitlab.com/gitlab-org/fleeting/fleeting/plugin"
 var (
 	NAME      = "fleeting-plugin-proxmox"
 	VERSION   = "dev"
-	REVISION  = "HEAD"
-	REFERENCE = "HEAD"
-	BUILT     = "now"
+	REVISION  = "unknown"
+	REFERENCE = "unknown"
+	BUILT     = "unknown"
 
 	Version plugin.VersionInfo
 )
