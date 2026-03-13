@@ -101,7 +101,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 			VMDiskDevice:          g.VMDiskDevice,
 			MandatoryTags:         g.mandatoryTags(),
 			DescriptionTemplate:   g.DescriptionTemplate,
-			CloudInitInterface:    g.CloudInitInterface,
+			CloudInitInterface:    "ipconfig0",
 			NetworkMode:           g.NetworkMode,
 			CIUser:                g.CIUser,
 			NameServers:           g.NameServers,

@@ -62,6 +62,7 @@ For `network_mode = "dhcp"`:
 5. Return connect information for SSH.
 
 If any step fails, the plugin destroys the partially created VM and releases the lease.
+Failed provisioning attempts do not leave released leases behind; the lease is removed from allocator state instead of entering reuse cooldown.
 
 ## Scheduler behavior
 
@@ -75,9 +76,26 @@ This minimizes impact on unrelated workloads already running on the same hypervi
 
 The resource headroom check uses current free resources reported by Proxmox, not a separate reservation model.
 
+For `clone_mode = "auto"`, linked clones are used only when all of the following are true:
+
+- the template is local to the selected node
+- the selected datastore matches the template datastore
+- the datastore `plugintype` is in the explicit linked-clone whitelist:
+  - `dir`
+  - `nfs`
+  - `lvmthin`
+  - `zfspool`
+  - `rbd`
+  - `sheepdog`
+  - `nexenta`
+
+Otherwise the plugin falls back to full clone.
+
+If a configured node becomes unavailable after successful `Init()`, runtime placement logs a warning and skips that node for new provisioning attempts. Existing managed VMs on that node are still surfaced as-is; operations against them continue to fail normally until the node becomes reachable again.
+
 ## State model
 
-The plugin persists IP allocations in a local JSON state file protected by a lock file. Startup reconciliation rebuilds occupied leases from currently managed VMs and converts stale leases back into reusable entries after a cooldown period.
+The plugin persists IP allocations in a local JSON state file protected by a lock file. By default the allocator state lives under `/var/lib/fleeting-plugin-proxmox` and is scoped by `cluster/pool/name_prefix`. Startup reconciliation rebuilds occupied leases from currently managed VMs and converts stale leases back into reusable entries after a cooldown period. Failed provisioning rollback removes allocator entries completely instead of leaving them behind as released leases.
 
 ## Security posture
 
@@ -88,3 +106,10 @@ The plugin persists IP allocations in a local JSON state file protected by a loc
 - no host-level networking or migration control
 - no raw QEMU argument passthrough
 - no arbitrary Cloud-Init custom snippets in v1
+
+## Compatibility
+
+The plugin has been tested against:
+
+- Proxmox VE 8
+- Proxmox VE 9

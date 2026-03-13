@@ -2,170 +2,132 @@
 
 A GitLab Fleeting plugin for Proxmox VE.
 
+## Overview
 
-## v1 scope
+This plugin provisions ephemeral Proxmox VMs for GitLab Runner Fleeting and has been exercised with both `instance` and `docker-autoscaler`.
 
 - QEMU only
 - Linux guests only
-- SSH only
-- Cloud-Init networking with either static IPv4 assignment or DHCP
-- dedicated Proxmox pool, dedicated VMID range, mandatory management tags
+- SSH connector only
+- Cloud-Init networking in either `static` or `dhcp` mode
+- dedicated Proxmox pool, dedicated VMID range, and mandatory management tags
 
-## Executor modes
+Tested against Proxmox VE 8 and Proxmox VE 9.
 
-The plugin works with both GitLab Runner Fleeting-based executors:
+## Build and Install
 
-- `instance`
-  The job runs directly on the ephemeral VM over the normal instance connector flow.
-- `docker-autoscaler`
-  The ephemeral VM acts as a Docker host, and jobs run in Docker containers inside that VM.
+Use the repository `Makefile`:
 
-The plugin itself does not need different provisioning logic for these modes. In both cases it only needs to:
+```bash
+make test
+make build
+```
 
-- create the VM
-- wait until the VM is reachable
-- return connection details to GitLab Runner
+This produces:
 
-The difference is on the Runner side:
+```text
+dist/fleeting-plugin-proxmox
+```
 
-- `instance` expects a usable job host OS
-- `docker-autoscaler` expects a usable Docker host inside the VM template
+To remove build artifacts:
 
-## Core configuration
+```bash
+make clean
+```
 
-Required plugin configuration:
+### Installing
 
-- `api_url`
-- `token_id`
-- `token_secret`
-- `pool`
-- `template_vmids`
-- `name_prefix`
-- `vmid_range`
-- `nodes`
-- `network_mode`
+1. Build the binary with `make build`.
+2. Copy `dist/fleeting-plugin-proxmox` to the GitLab Runner host under the name `fleeting-plugin-proxmox`.
+3. Make sure the binary is executable and discoverable via `$PATH`.
+4. In the `[runners.autoscaler]` section of `config.toml`, set `plugin = "fleeting-plugin-proxmox"`.
+5. Restart `gitlab-runner`.
 
-Recommended plugin configuration:
+## Configuration
 
-- `ip_pool_network` and `ip_pool_gateway` for `network_mode = "static"`
-- `ip_pool_ranges` for `network_mode = "static"`
-- `target_storages` to constrain clone placement to an allowlist of datastores
-- `state_file`
-- `ci_user`
-- `ci_ssh_keys`
-- `nameserver`
-- `searchdomain`
-- `node_reserve_memory_mb`
-- `node_reserve_memory_percent`
-- `node_reserve_cpu_cores`
-- `node_reserve_cpu_percent`
-- `node_reserve_disk_gb`
-- `node_reserve_disk_percent`
+Unless stated otherwise, the options below belong to `[runners.autoscaler.plugin_config]` in `config.toml`.
 
-## Plugin configuration reference
+### Plugin configuration reference
 
-- `api_url`  
-  Proxmox API base URL, for example `https://pve.example.com:8006`. Required.
-- `token_id`  
-  Proxmox API token ID. Required.
-- `token_secret`  
-  Proxmox API token secret. Required.
-- `tls_ca_file`  
-  Optional CA bundle used to verify the Proxmox TLS certificate.
-- `tls_insecure_skip_verify`  
-  Disables TLS certificate verification. Intended only for development.
-- `cluster_name`  
-  Logical cluster identifier used in the Fleeting provider ID. Default: `default`.
-- `pool`  
-  Dedicated Proxmox pool for managed VMs. Required.
-- `template_vmids`  
-  Source QEMU template VMIDs. Required. The plugin prefers a template that already lives on the selected node; if the node has no local template, it requires a shared clone path via one of the configured `target_storages`.
-- `name_prefix`  
-  Prefix used for created VM names and management tags. Required.
-- `vmid_range`  
-  Dedicated VMID range in `start-end` form. Required.
-- `nodes`  
-  Node allowlist used for placement. Required. Accepts a string or list.
-- `clone_mode`  
-  `auto`, `linked`, or `full`. Default: `auto`.
-- `target_storages`  
-  Optional datastore allowlist. Accepts a string or list. The plugin chooses the most free matching datastore per node and uses that datastore's free space for disk placement checks. A datastore is considered usable on a node only when both conditions hold: Proxmox storage config allows that node in the storage `Nodes` setting, and storage capacity is reported for that storage on that node. With `clone_mode = "auto"`, the plugin still uses linked clones when the template is already local to the selected node and the selected datastore matches the template datastore; otherwise it falls back to full clone. With explicit `clone_mode = "linked"`, every configured node must resolve to a local template, and that template datastore must be included in `target_storages`.
-- `clone_snapshot`  
-  Optional snapshot name to use when cloning from the template.
-- `vm_memory_mb`  
-  Optional memory override for cloned VMs in MiB. When unset, the template memory is used.
-- `vm_cpu_cores`  
-  Optional vCPU core override for cloned VMs. When unset, the template CPU count is used.
-- `vm_disk_mb`  
-  Optional absolute disk size override for the cloned VM primary disk in MiB. The value must not be smaller than the template disk.
-- `vm_disk_device`  
-  Optional Proxmox disk device name used for `vm_disk_mb`, for example `scsi0`. When unset, the plugin uses `bootdisk` from the template and falls back to common primary disk names.
-- `node_reserve_memory_mb`  
-  Minimum free memory that must remain on the selected node after placement.
-- `node_reserve_memory_percent`  
-  Percentage of total node memory that must remain free after placement. When set, it takes precedence over `node_reserve_memory_mb`.
-- `node_reserve_cpu_cores`  
-  Minimum free CPU headroom that must remain on the selected node after placement.
-- `node_reserve_cpu_percent`  
-  Percentage of total node CPU cores that must remain free after placement. When set, it takes precedence over `node_reserve_cpu_cores`.
-- `node_reserve_disk_gb`  
-  Minimum free disk that must remain on the selected node after placement.
-- `node_reserve_disk_percent`  
-  Percentage of total target datastore capacity that must remain free after placement. When set, it takes precedence over `node_reserve_disk_gb`.
-- `scheduler`  
-  Node selection policy: `balanced`, `most_free_ram`, `most_free_cpu`, or `round_robin`. Default: `balanced`.
-- `max_parallel_clones`  
-  Maximum concurrent clone operations. Default: `2`.
-- `max_parallel_starts`  
-  Maximum concurrent start operations. Default: `4`.
-- `max_parallel_deletes`  
-  Maximum concurrent delete operations. Default: `2`.
-- `task_poll_interval`  
-  Poll interval for Proxmox async task completion. Default: `2s`.
-- `clone_timeout`  
-  Timeout for clone operations. Default: `10m`.
-- `start_timeout`  
-  Timeout for VM start and readiness wait. Default: `5m`.
-- `shutdown_timeout`  
-  Timeout for forced stop and delete path task completion. Default: `2m`.
-- `cloud_init_enabled`  
-  Must remain `true` in v1. Default: `true`.
-- `cloud_init_interface`  
-  Must be `ipconfig0` in v1. Default: `ipconfig0`.
-- `network_mode`  
-  `static` or `dhcp`. Default: `static`.
-- `ci_user`  
-  Optional Cloud-Init login user. Also becomes the default SSH username returned by the plugin.
-- `ci_ssh_keys`  
-  Optional Cloud-Init public SSH keys. Accepts a string or list.
-- `nameserver`  
-  Optional DNS servers passed to Cloud-Init. Accepts a string or list.
-- `searchdomain`  
-  Optional DNS search domain passed to Cloud-Init.
-- `ip_pool_network`  
-  IPv4 subnet used for static allocation. Required only for `network_mode = "static"`.
-- `ip_pool_gateway`  
-  IPv4 gateway used for static allocation. Required only for `network_mode = "static"`.
-- `ip_pool_ranges`  
-  Optional address ranges within `ip_pool_network` used for static allocation. Accepts a string or list.
-- `ip_pool_exclude`  
-  Optional addresses excluded from static allocation. Accepts a string or list.
-- `ip_pool_reuse_cooldown`  
-  Cooldown before a released static IP can be reused. Default: `10m`.
-- `state_file`  
-  State file used by the static IP allocator. Default: `/var/lib/fleeting-plugin-proxmox/<cluster>-<pool>-<name_prefix>-state.json`.
-- `agent_required`  
-  Whether QEMU guest agent is required for readiness and IP discovery. Effectively required for recommended deployments and mandatory for `network_mode = "dhcp"`. Default: `true`.
-- `agent_timeout`  
-  Timeout for guest agent IP discovery. Default: `3m`.
-- `prefer_ipv6`  
-  Unsupported in v1 and must not be enabled.
-- `tags`  
-  Optional extra management tags added to created VMs. Accepts a string or list.
-- `description_template`  
-  Optional Go text/template for VM descriptions. Template variables: `.Node`, `.VMID`, `.IP`, `.Pool`.
+#### API and identity
 
-## Safety model
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_url` | string | yes |  | Proxmox API base URL, for example `https://pve.example.com:8006`. |
+| `token_id` | string | yes |  | Proxmox API token ID. |
+| `token_secret` | string | yes |  | Proxmox API token secret. |
+| `tls_ca_file` | string | no |  | Optional CA bundle used to verify the Proxmox TLS certificate. |
+| `tls_insecure_skip_verify` | bool | no | `false` | Development only. |
+| `cluster_name` | string | no | `default` | Logical cluster identifier used in Fleeting provider IDs and default allocator state path. |
+| `pool` | string | yes |  | Dedicated Proxmox pool for managed VMs. |
+| `name_prefix` | string | yes |  | Prefix used for created VM names and mandatory management tags. |
+| `vmid_range` | string | yes |  | Dedicated VMID range in `start-end` form. |
+| `nodes` | string or list | yes |  | Placement allowlist. |
+
+#### Templates and storage
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `template_vmids` | int list | yes |  | Source QEMU template VMIDs. The plugin prefers a template already local to the selected node. |
+| `clone_mode` | enum | no | `auto` | One of `auto`, `linked`, or `full`. |
+| `target_storages` | string or list | no |  | Datastore allowlist. |
+| `clone_snapshot` | string | no |  | Optional snapshot name used when cloning from the template. |
+| `vm_memory_mb` | int64 | no | template value | Optional memory override in MiB. |
+| `vm_cpu_cores` | int | no | template value | Optional vCPU override. |
+| `vm_disk_mb` | int64 | no | template value | Optional absolute primary disk size in MiB. Must not be smaller than the template disk. |
+| `vm_disk_device` | string | no | autodetect | Optional explicit disk device for `vm_disk_mb`, for example `scsi0`. |
+
+#### Placement and concurrency
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `scheduler` | enum | no | `balanced` | One of `balanced`, `most_free_ram`, `most_free_cpu`, or `round_robin`. |
+| `node_reserve_memory_mb` | int64 | no | `0` | Reserved memory headroom on the node. |
+| `node_reserve_memory_percent` | int | no | `0` | Reserved memory headroom on the node, as a percentage of total memory. Overrides `node_reserve_memory_mb` when set. |
+| `node_reserve_cpu_cores` | int | no | `0` | Reserved CPU headroom on the node. |
+| `node_reserve_cpu_percent` | int | no | `0` | Reserved CPU headroom on the node, as a percentage of total CPU capacity. Overrides `node_reserve_cpu_cores` when set. |
+| `node_reserve_disk_gb` | int64 | no | `0` | Reserved free space on the target datastore. |
+| `node_reserve_disk_percent` | int | no | `0` | Reserved free space on the target datastore, as a percentage of total capacity. Overrides `node_reserve_disk_gb` when set. |
+| `max_parallel_clones` | int | no | `2` | Maximum concurrent clone operations. |
+| `max_parallel_starts` | int | no | `4` | Maximum concurrent start operations. |
+| `max_parallel_deletes` | int | no | `2` | Maximum concurrent delete operations. |
+| `task_poll_interval` | duration string | no | `2s` | Poll interval for Proxmox async task completion. |
+| `clone_timeout` | duration string | no | `10m` | Timeout for clone operations. |
+| `start_timeout` | duration string | no | `5m` | Timeout for VM start and readiness wait. |
+| `shutdown_timeout` | duration string | no | `2m` | Timeout for stop-and-delete task completion during instance removal. |
+
+#### Cloud-Init and networking
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `network_mode` | enum | yes | `static` | One of `static` or `dhcp`. |
+| `ci_user` | string | no |  | Optional Cloud-Init login user. Also becomes the default SSH username returned by the plugin. |
+| `ci_ssh_keys` | string or list | no |  | Optional public SSH keys. |
+| `nameserver` | string or list | no |  | Optional DNS servers. |
+| `searchdomain` | string | no |  | Optional DNS search domain. |
+
+#### Static IP allocator
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `ip_pool_network` | CIDR string | for `static` |  | IPv4 subnet used for static allocation. |
+| `ip_pool_gateway` | IPv4 string | for `static` |  | IPv4 gateway used for static allocation. |
+| `ip_pool_ranges` | range string or list | no | full subnet minus reserved addresses | Optional address ranges within `ip_pool_network`, for example `10.10.20.100-10.10.20.199`. |
+| `ip_pool_exclude` | IPv4 string or list | no |  | Optional excluded addresses. |
+| `ip_pool_reuse_cooldown` | duration string | no | `10m` | Cooldown before a released static IP can be reused. |
+| `state_file` | path string | no | `/var/lib/fleeting-plugin-proxmox/<cluster>-<pool>-<name_prefix>-state.json` | Persistent allocator state file. |
+
+#### Guest agent and metadata
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `agent_required` | bool | no | `true` | Mandatory for `network_mode = "dhcp"`. |
+| `agent_timeout` | duration string | no | `3m` | Timeout for guest-agent IP discovery. |
+| `prefer_ipv6` | bool | no | `false` | Not supported by the current implementation. |
+| `tags` | string or list | no |  | Optional extra management tags. |
+| `description_template` | string | no |  | Optional Go `text/template` using `.Node`, `.VMID`, `.IP`, `.Pool`. |
+
+## Safety
 
 The plugin only manages VMs that satisfy all of the following:
 
@@ -175,50 +137,19 @@ The plugin only manages VMs that satisfy all of the following:
 - carrying the mandatory plugin tags
 
 This prevents accidental cleanup of unrelated workloads on the same hypervisor.
+You still need to grant only the minimum required Proxmox privileges. The plugin is conservative about managed VM identity, but it cannot compensate for an over-privileged API token.
 
-## Static IP provisioning
-
-The plugin allocates an IP from a configured pool, writes it through Cloud-Init, persists the lease in a local state file, and reconciles leases against currently managed VMs on startup.
-
-When `network_mode = "dhcp"`, the plugin configures `ip=dhcp` in Cloud-Init and discovers the actual address through the QEMU guest agent before returning `ConnectInfo`.
-
-## Datastore selection
-
-Datastore placement works as follows:
-
-- `target_storages`
-  Preferred option. Accepts a single string or a list. The plugin chooses the datastore with the most currently free space among the configured candidates that are usable from the selected node.
-- neither set
-  The plugin leaves datastore selection to Proxmox or template defaults.
-
-## Node reserve semantics
-
-`node_reserve_memory_mb` / `node_reserve_memory_percent`, `node_reserve_cpu_cores` / `node_reserve_cpu_percent`, and `node_reserve_disk_gb` / `node_reserve_disk_percent` are admission filters based on the current free resources reported by Proxmox for a node.
-
-They are evaluated as:
-
-- current free memory minus the template VM memory must stay above `node_reserve_memory_mb`
-- current free CPU headroom minus the template VM vCPU count must stay above `node_reserve_cpu_cores`
-- current free disk minus the template VM disk size must stay above `node_reserve_disk_gb`
-- when the corresponding `*_percent` field is set, the reserve is derived from total node or datastore capacity instead of the absolute field
-
-For CPU specifically, the plugin does not use load average. It converts the current Proxmox CPU utilization fraction into free cores:
-
-- `free_cpu_cores = total_cpus - (cpu_utilization * total_cpus)`
-
-They do not create reservations in Proxmox and they do not use a separate reservation accounting model.
-
-## RBAC example
+### Required RBAC groups
 
 One practical way to split Proxmox privileges for this plugin is into three roles.
 
-`GitlabFleetingNodes`
+#### `GitlabFleetingNodes`
 
 - assign on `/nodes/<allowed-node>`
 - privileges:
   - `Sys.Audit`
 
-`GitlabFleetingPool`
+#### `GitlabFleetingPool`
 
 - assign on `/pool/<managed-pool>`
 - privileges:
@@ -237,20 +168,39 @@ One practical way to split Proxmox privileges for this plugin is into three role
   - `VM.PowerMgmt`
   - `VM.Monitor`
 
-`GitlabFleetingSDN`
+#### `GitlabFleetingSDN`
 
-- assign on `/sdn/zones/localnetwork`
+- assign on `/sdn/zones/localnetwork/<bridge>`
 - privileges:
   - `SDN.Use`
 
 Notes:
 
-- the storage privileges above assume target storages are members of the managed pool
+- the practical model above assumes target storages and template VMs are members of the managed pool
 - `VM.Monitor` is required on Proxmox VE 8 for guest-agent IP discovery
-- `Sys.Audit` is retained on the pool role for practical compatibility with newer Proxmox privilege changes
-- if the environment does not use SDN-backed bridges, the SDN role can be omitted
+- `VM.GuestAgent.Audit` is required on Proxmox VE 9 for guest-agent IP discovery
+- `Sys.Audit` is retained in the pool role for practical compatibility across PVE 8 and 9 deployments
+- `SDN.Use` is required on the `localnetwork/<bridge>` path used by the template NIC
+- the plugin does not configure the VM bridge; bridge and SDN attachment come from the template NIC
 
-## Example GitLab Runner configuration
+### Node reserve semantics
+
+`node_reserve_memory_mb` / `node_reserve_memory_percent`, `node_reserve_cpu_cores` / `node_reserve_cpu_percent`, and `node_reserve_disk_gb` / `node_reserve_disk_percent` are admission filters based on the current free resources reported by Proxmox for a node.
+
+They are evaluated as:
+
+- current free memory minus the template VM memory must stay above `node_reserve_memory_mb`
+- current free CPU headroom minus the template VM vCPU count must stay above `node_reserve_cpu_cores`
+- current free disk minus the template VM disk size must stay above `node_reserve_disk_gb`
+- when the corresponding `*_percent` field is set, the reserve is derived from total node or datastore capacity instead of the absolute field
+
+For CPU specifically, the plugin does not use load average. It converts the current Proxmox CPU utilization fraction into free cores:
+
+- `free_cpu_cores = total_cpus - (cpu_utilization * total_cpus)`
+
+They do not create reservations in Proxmox and they do not use a separate reservation accounting model.
+
+## Runner Configuration
 
 See [`examples/config.toml`](/workspace/fleeting-plugin-proxmox/examples/config.toml) for a complete example.
 
@@ -264,7 +214,7 @@ Minimal shape:
   executor = "instance"
 
   [runners.autoscaler]
-    plugin = "/path/to/fleeting-plugin-proxmox"
+    plugin = "fleeting-plugin-proxmox"
     capacity_per_instance = 1
     max_use_count = 1
     max_instances = 20
@@ -285,7 +235,7 @@ Minimal shape:
     ip_pool_network = "10.10.20.0/24"
     ip_pool_gateway = "10.10.20.1"
     ip_pool_ranges = ["10.10.20.100-10.10.20.199"]
-    state_file = "/var/lib/fleeting-plugin-proxmox/state.json"
+    state_file = "/var/lib/fleeting-plugin-proxmox/prod-pve-gitlab-ci-glr-state.json"
     ci_user = "ubuntu"
     ci_ssh_keys = ["ssh-ed25519 AAAA... runner@example"]
 
@@ -304,10 +254,3 @@ See [`examples/docker-autoscaler.config.toml`](/workspace/fleeting-plugin-proxmo
 - Use a subnet dedicated to ephemeral runner VMs. Do not share it with manually managed VMs.
 - `network_mode = "dhcp"` skips the local IP allocator and requires the guest agent to report the acquired address.
 - For `docker-autoscaler`, the template VM must already contain a working Docker Engine configuration suitable for GitLab Runner.
-
-## GitHub Actions
-
-The repository includes GitHub Actions workflows:
-
-- [`ci.yml`](/workspace/fleeting-plugin-proxmox/.github/workflows/ci.yml): formatting, module hygiene, tests, and build on pushes and pull requests.
-- [`release.yml`](/workspace/fleeting-plugin-proxmox/.github/workflows/release.yml): builds release binaries for tagged versions and uploads `.tar.gz` artifacts to the GitHub Release.

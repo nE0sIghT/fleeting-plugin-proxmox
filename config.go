@@ -22,7 +22,6 @@ const (
 	defaultShutdownTimeout   = 2 * time.Minute
 	defaultAgentTimeout      = 3 * time.Minute
 	defaultIPReuseCooldown   = 10 * time.Minute
-	defaultCloudInitIFace    = "ipconfig0"
 	defaultStateDir          = "/var/lib/fleeting-plugin-proxmox"
 	defaultStateFileBasename = "state.json"
 )
@@ -70,13 +69,11 @@ type pluginConfig struct {
 	StartTimeout     string `json:"start_timeout"`
 	ShutdownTimeout  string `json:"shutdown_timeout"`
 
-	CloudInitEnabled   bool          `json:"cloud_init_enabled"`
-	CloudInitInterface string        `json:"cloud_init_interface"`
-	NetworkMode        string        `json:"network_mode"`
-	CIUser             string        `json:"ci_user"`
-	CISSHKeys          LaxStringList `json:"ci_ssh_keys"`
-	NameServers        LaxStringList `json:"nameserver"`
-	SearchDomain       string        `json:"searchdomain"`
+	NetworkMode  string        `json:"network_mode"`
+	CIUser       string        `json:"ci_user"`
+	CISSHKeys    LaxStringList `json:"ci_ssh_keys"`
+	NameServers  LaxStringList `json:"nameserver"`
+	SearchDomain string        `json:"searchdomain"`
 
 	IPPoolNetwork       string        `json:"ip_pool_network"`
 	IPPoolGateway       string        `json:"ip_pool_gateway"`
@@ -144,14 +141,8 @@ func (c *pluginConfig) applyDefaults(settings provider.Settings) {
 	if c.IPPoolReuseCooldown == "" {
 		c.IPPoolReuseCooldown = defaultIPReuseCooldown.String()
 	}
-	if c.CloudInitInterface == "" {
-		c.CloudInitInterface = defaultCloudInitIFace
-	}
 	if c.StateFile == "" {
 		c.StateFile = filepath.Join(defaultStateDir, defaultStateFileName(c.ClusterName, c.Pool, c.NamePrefix))
-	}
-	if !c.CloudInitEnabled {
-		c.CloudInitEnabled = true
 	}
 	if !c.AgentRequired {
 		c.AgentRequired = true
@@ -226,12 +217,6 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	}
 	if c.Scheduler != "balanced" && c.Scheduler != "most_free_ram" && c.Scheduler != "most_free_cpu" && c.Scheduler != "round_robin" {
 		errs = append(errs, fmt.Errorf("invalid scheduler: %s", c.Scheduler))
-	}
-	if c.CloudInitInterface != "ipconfig0" {
-		errs = append(errs, fmt.Errorf("cloud_init_interface must be ipconfig0 in v1"))
-	}
-	if !c.CloudInitEnabled {
-		errs = append(errs, fmt.Errorf("cloud_init_enabled=false is unsupported in v1"))
 	}
 	if c.NetworkMode == "dhcp" && !c.AgentRequired {
 		errs = append(errs, fmt.Errorf("network_mode=dhcp requires agent_required=true"))

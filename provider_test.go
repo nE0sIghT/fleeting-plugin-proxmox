@@ -350,7 +350,6 @@ func TestProviderLifecycle(t *testing.T) {
 			group.NamePrefix = "runner"
 			group.VMIDRange = "5000-5005"
 			group.Nodes = LaxStringList{"node1"}
-			group.CloudInitEnabled = true
 			group.NetworkMode = tc.networkMode
 			group.StateFile = filepath.Join(t.TempDir(), "state.json")
 			group.CIUser = "ubuntu"
@@ -426,7 +425,6 @@ func TestCloneRollbackDoesNotDeleteForeignVM(t *testing.T) {
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
-	group.CloudInitEnabled = true
 	group.NetworkMode = "dhcp"
 	group.StateFile = filepath.Join(t.TempDir(), "state.json")
 
@@ -463,7 +461,6 @@ func TestTargetStoragePlacementIgnoresNodeRootFS(t *testing.T) {
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
-	group.CloudInitEnabled = true
 	group.NetworkMode = "dhcp"
 	group.CloneMode = "full"
 	group.TargetStorages = LaxStringList{"ceph-vm"}
@@ -506,7 +503,6 @@ func TestTargetStorageMustExistOnSelectedNode(t *testing.T) {
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
-	group.CloudInitEnabled = true
 	group.NetworkMode = "dhcp"
 	group.CloneMode = "full"
 	group.TargetStorages = LaxStringList{"ceph-vm"}
@@ -550,7 +546,6 @@ func TestInitFailsWhenNodeHasNoLocalTemplateAndNoSharedTargetStorage(t *testing.
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node2"}
-	group.CloudInitEnabled = true
 	group.NetworkMode = "dhcp"
 	group.CloneMode = "full"
 	group.TargetStorages = LaxStringList{"fast-local"}
@@ -597,7 +592,6 @@ func TestSharedTemplateFallbackUsesFullCloneOnSharedTemplateStorage(t *testing.T
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node2"}
-	group.CloudInitEnabled = true
 	group.NetworkMode = "dhcp"
 	group.CloneMode = "full"
 	group.TargetStorages = LaxStringList{"ceph-vm"}
@@ -649,7 +643,6 @@ func TestLinkedCloneModeFailsInitWithoutLocalTemplate(t *testing.T) {
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node2"}
-	group.CloudInitEnabled = true
 	group.NetworkMode = "dhcp"
 	group.CloneMode = "linked"
 	group.TargetStorages = LaxStringList{"ceph-vm"}
@@ -690,7 +683,6 @@ func TestAutoCloneModeFallsBackToFullForUnsupportedStoragePluginType(t *testing.
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
-	group.CloudInitEnabled = true
 	group.NetworkMode = "dhcp"
 	group.CloneMode = "auto"
 	group.TargetStorages = LaxStringList{"local-lvm"}
@@ -741,7 +733,6 @@ func TestIncreaseSkipsUnavailableNodeAfterInit(t *testing.T) {
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1", "node2"}
-	group.CloudInitEnabled = true
 	group.NetworkMode = "dhcp"
 	group.CloneMode = "full"
 	group.TargetStorages = LaxStringList{"local-lvm"}

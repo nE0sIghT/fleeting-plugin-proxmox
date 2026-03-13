@@ -41,12 +41,11 @@ check_interval = 3
     vm_cpu_cores = 4
     vm_disk_mb = 40960
     network_mode = "dhcp"
-    cloud_init_enabled = true
-    cloud_init_interface = "ipconfig0"
     ci_user = "ubuntu"
     ci_ssh_keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBExampleRunnerKey gitlab-runner@example"
     ]
+    state_file = "/var/lib/fleeting-plugin-proxmox/prod-pve-gitlab-ci-glr-docker-state.json"
 
   [runners.autoscaler.connector_config]
     os = "linux"
