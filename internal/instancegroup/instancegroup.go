@@ -72,6 +72,9 @@ type Group struct {
 	cloneLimiter  *limiter.Limiter
 	startLimiter  *limiter.Limiter
 	deleteLimiter *limiter.Limiter
+	runCtx        context.Context
+	cancelRun     context.CancelFunc
+	provisionWg   sync.WaitGroup
 
 	mu sync.Mutex
 	// transient overrides smooth out state transitions while long-running Proxmox tasks complete.
@@ -132,6 +135,7 @@ type templateChoice struct {
 }
 
 func New(client *proxmoxclient.Client, log hclog.Logger, cfg Config, pool *ippool.Pool, cloneLimiter, startLimiter, deleteLimiter *limiter.Limiter) *Group {
+	runCtx, cancelRun := context.WithCancel(context.Background())
 	return &Group{
 		client:        client,
 		log:           log,
@@ -140,6 +144,8 @@ func New(client *proxmoxclient.Client, log hclog.Logger, cfg Config, pool *ippoo
 		cloneLimiter:  cloneLimiter,
 		startLimiter:  startLimiter,
 		deleteLimiter: deleteLimiter,
+		runCtx:        runCtx,
+		cancelRun:     cancelRun,
 		transient:     map[string]provider.State{},
 		pendingByNode: map[string]pendingReservation{},
 		pendingVMIDs:  map[int]struct{}{},
@@ -293,56 +299,25 @@ func (g *Group) Increase(ctx context.Context, delta int) ([]string, error) {
 		return nil, planErr
 	}
 
-	type result struct {
-		id  string
-		err error
-	}
-
-	workerCount := g.provisionWorkerCount()
-	jobs := make(chan provisionPlan)
-	results := make(chan result, len(plans))
-	var wg sync.WaitGroup
-
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for plan := range jobs {
-				id, err := g.provisionOne(ctx, plan)
-				g.releasePendingPlan(plan)
-				results <- result{id: id, err: err}
-			}
-		}()
-	}
-
 	for _, plan := range plans {
-		jobs <- plan
-	}
-	close(jobs)
-	wg.Wait()
-	close(results)
+		id := instanceID(plan.Node, plan.VMID)
+		g.setTransient(id, provider.StateCreating)
+		g.provisionWg.Add(1)
+		go func(plan provisionPlan, id string) {
+			defer g.provisionWg.Done()
+			defer g.releasePendingPlan(plan)
 
-	created := make([]string, 0, len(plans))
-	var errs []error
+			if _, err := g.provisionOne(g.runCtx, plan); err != nil {
+				g.log.Error("provisioning failed", "instance", id, "error", err)
+			}
+		}(plan, id)
+	}
+
 	if planErr != nil {
-		errs = append(errs, planErr)
-	}
-	for res := range results {
-		if res.err != nil {
-			errs = append(errs, res.err)
-			continue
-		}
-		created = append(created, res.id)
+		g.log.Warn("provisioning partially requested", "requested", delta, "accepted", len(plans), "error", planErr)
 	}
 
-	if len(created) > 0 {
-		if err := errors.Join(errs...); err != nil {
-			g.log.Warn("provisioning completed with partial failures", "created", len(created), "requested", len(plans), "error", err)
-		}
-		return created, nil
-	}
-
-	return created, errors.Join(errs...)
+	return plannedIDs(plans), nil
 }
 
 func (g *Group) Decrease(ctx context.Context, ids []string) ([]string, error) {
@@ -391,6 +366,25 @@ func (g *Group) Decrease(ctx context.Context, ids []string) ([]string, error) {
 	}
 
 	return deleted, errors.Join(errs...)
+}
+
+func (g *Group) Shutdown(ctx context.Context) error {
+	if g.cancelRun != nil {
+		g.cancelRun()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		g.provisionWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
 }
 
 func (g *Group) ConnectInfo(ctx context.Context, id string, settings provider.Settings) (provider.ConnectInfo, error) {
@@ -1560,6 +1554,14 @@ func (g *Group) clearTransient(id string) {
 
 func instanceID(node string, vmid int) string {
 	return fmt.Sprintf("%s/%d", node, vmid)
+}
+
+func plannedIDs(plans []provisionPlan) []string {
+	ids := make([]string, 0, len(plans))
+	for _, plan := range plans {
+		ids = append(ids, instanceID(plan.Node, plan.VMID))
+	}
+	return ids
 }
 
 func mapState(status string) provider.State {

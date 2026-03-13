@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/stretchr/testify/require"
@@ -41,6 +42,7 @@ type mockProxmox struct {
 	template                 mockVM
 	vms                      map[int]mockVM
 	taskNode                 map[string]string
+	cloneDelay               time.Duration
 	failClone                bool
 	failLinkedCloneOnStorage map[string]bool
 	downNodes                map[string]bool
@@ -178,6 +180,9 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 			})
 			return
 		case r.Method == http.MethodPost && r.URL.Path == "/api2/json/nodes/node1/qemu/9000/clone":
+			if m.cloneDelay > 0 {
+				time.Sleep(m.cloneDelay)
+			}
 			require.NoError(t, r.ParseForm())
 			vmid, err := strconv.Atoi(r.PostForm.Get("newid"))
 			require.NoError(t, err)
@@ -367,19 +372,25 @@ func TestProviderLifecycle(t *testing.T) {
 			info, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 			require.NoError(t, err)
 			require.Equal(t, "proxmox/lab/ci/runner", info.ID)
+			defer func() {
+				require.NoError(t, group.Shutdown(context.Background()))
+			}()
 
 			count, err := group.Increase(context.Background(), 1)
 			require.NoError(t, err)
 			require.Equal(t, 1, count)
 
 			var ids []string
-			err = group.Update(context.Background(), func(instance string, state provider.State) {
-				if state == provider.StateRunning {
-					ids = append(ids, instance)
-				}
-			})
-			require.NoError(t, err)
-			require.Len(t, ids, 1)
+			require.Eventually(t, func() bool {
+				ids = nil
+				err = group.Update(context.Background(), func(instance string, state provider.State) {
+					if state == provider.StateRunning {
+						ids = append(ids, instance)
+					}
+				})
+				require.NoError(t, err)
+				return len(ids) == 1
+			}, 2*time.Second, 25*time.Millisecond)
 
 			connectInfo, err := group.ConnectInfo(context.Background(), ids[0])
 			require.NoError(t, err)
@@ -430,10 +441,18 @@ func TestCloneRollbackDoesNotDeleteForeignVM(t *testing.T) {
 
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
 
-	_, err = group.Increase(context.Background(), 1)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "clone failed")
+	count, err := group.Increase(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	require.Eventually(t, func() bool {
+		_, exists := mock.vms[5001]
+		return !exists
+	}, 500*time.Millisecond, 25*time.Millisecond)
 
 	foreign, ok := mock.vms[5000]
 	require.True(t, ok)
@@ -484,6 +503,44 @@ func TestInitDeletesPreexistingStoppedManagedInstances(t *testing.T) {
 	require.Empty(t, mock.vms)
 }
 
+func TestIncreaseReturnsAfterRequestsAreAccepted(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.cloneDelay = 300 * time.Millisecond
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node1"}
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"ceph-vm"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
+
+	start := time.Now()
+	count, err := group.Increase(context.Background(), 1)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Less(t, elapsed, 150*time.Millisecond)
+}
+
 func TestTargetStoragePlacementIgnoresNodeRootFS(t *testing.T) {
 	t.Parallel()
 
@@ -511,11 +568,16 @@ func TestTargetStoragePlacementIgnoresNodeRootFS(t *testing.T) {
 
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
 
 	count, err := group.Increase(context.Background(), 1)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
-	require.Equal(t, "ceph-vm", mock.vms[5000].Storage)
+	require.Eventually(t, func() bool {
+		return mock.vms[5000].Storage == "ceph-vm"
+	}, 500*time.Millisecond, 25*time.Millisecond)
 }
 
 func TestTargetStorageMustExistOnSelectedNode(t *testing.T) {
@@ -642,12 +704,17 @@ func TestSharedTemplateFallbackUsesFullCloneOnSharedTemplateStorage(t *testing.T
 
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
 
 	count, err := group.Increase(context.Background(), 1)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
-	require.Equal(t, "node2", mock.vms[5000].Node)
-	require.Equal(t, "ceph-vm", mock.vms[5000].Storage)
+	require.Eventually(t, func() bool {
+		vm, ok := mock.vms[5000]
+		return ok && vm.Node == "node2" && vm.Storage == "ceph-vm"
+	}, 500*time.Millisecond, 25*time.Millisecond)
 }
 
 func TestLinkedCloneModeFailsInitWithoutLocalTemplate(t *testing.T) {
@@ -733,11 +800,16 @@ func TestAutoCloneModeFallsBackToFullForUnsupportedStoragePluginType(t *testing.
 
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
 
 	count, err := group.Increase(context.Background(), 1)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
-	require.Equal(t, "local-lvm", mock.vms[5000].Storage)
+	require.Eventually(t, func() bool {
+		return mock.vms[5000].Storage == "local-lvm"
+	}, 500*time.Millisecond, 25*time.Millisecond)
 }
 
 func TestIncreaseSkipsUnavailableNodeAfterInit(t *testing.T) {
@@ -857,6 +929,9 @@ func TestIncreaseSkipsUnavailableNodeAfterInit(t *testing.T) {
 
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
 
 	mock.mu.Lock()
 	mock.downNodes["node2"] = true
@@ -865,7 +940,9 @@ func TestIncreaseSkipsUnavailableNodeAfterInit(t *testing.T) {
 	count, err := group.Increase(context.Background(), 1)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
-	require.Equal(t, "node1", mock.vms[5000].Node)
+	require.Eventually(t, func() bool {
+		return mock.vms[5000].Node == "node1"
+	}, 500*time.Millisecond, 25*time.Millisecond)
 }
 
 func extractVMID(path string) int {

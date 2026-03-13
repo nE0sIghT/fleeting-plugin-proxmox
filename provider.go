@@ -176,7 +176,10 @@ func (g *InstanceGroup) Heartbeat(ctx context.Context, instance string) error {
 }
 
 func (g *InstanceGroup) Shutdown(ctx context.Context) error {
-	return nil
+	if g.group == nil {
+		return nil
+	}
+	return g.group.Shutdown(ctx)
 }
 
 func (g *InstanceGroup) prepareSSHCredentials() (string, error) {
