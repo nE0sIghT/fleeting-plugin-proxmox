@@ -48,5 +48,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/fleeting-plugin-proxmox-*
+            dist/fleeting-plugin-proxmox-linux-amd64
+            dist/fleeting-plugin-proxmox-linux-arm64
             dist/*.sha256
