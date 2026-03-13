@@ -42,12 +42,11 @@ jobs:
           make clean
           make build
           mv "dist/${BIN}" "dist/${OUT}"
-          tar -C dist -czf "dist/${OUT}.tar.gz" "${OUT}"
-          sha256sum "dist/${OUT}.tar.gz" > "dist/${OUT}.tar.gz.sha256"
+          sha256sum "dist/${OUT}" > "dist/${OUT}.sha256"
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.tar.gz
-            dist/*.tar.gz.sha256
+            dist/fleeting-plugin-proxmox-*
+            dist/*.sha256
