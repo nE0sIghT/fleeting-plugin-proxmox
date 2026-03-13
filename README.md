@@ -153,7 +153,7 @@ Recommended plugin configuration:
 - `ip_pool_reuse_cooldown`  
   Cooldown before a released static IP can be reused. Default: `10m`.
 - `state_file`  
-  State file used by the static IP allocator. Default: `${TMPDIR}/fleeting-plugin-proxmox/state.json`.
+  State file used by the static IP allocator. Default: `/var/lib/fleeting-plugin-proxmox/<cluster>-<pool>-<name_prefix>-state.json`.
 - `agent_required`  
   Whether QEMU guest agent is required for readiness and IP discovery. Effectively required for recommended deployments and mandatory for `network_mode = "dhcp"`. Default: `true`.
 - `agent_timeout`  

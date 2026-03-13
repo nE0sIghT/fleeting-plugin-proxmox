@@ -23,6 +23,7 @@ const (
 	defaultAgentTimeout      = 3 * time.Minute
 	defaultIPReuseCooldown   = 10 * time.Minute
 	defaultCloudInitIFace    = "ipconfig0"
+	defaultStateDir          = "/var/lib/fleeting-plugin-proxmox"
 	defaultStateFileBasename = "state.json"
 )
 
@@ -147,7 +148,7 @@ func (c *pluginConfig) applyDefaults(settings provider.Settings) {
 		c.CloudInitInterface = defaultCloudInitIFace
 	}
 	if c.StateFile == "" {
-		c.StateFile = filepath.Join(os.TempDir(), Version.Name, defaultStateFileName(c.ClusterName, c.Pool, c.NamePrefix))
+		c.StateFile = filepath.Join(defaultStateDir, defaultStateFileName(c.ClusterName, c.Pool, c.NamePrefix))
 	}
 	if !c.CloudInitEnabled {
 		c.CloudInitEnabled = true

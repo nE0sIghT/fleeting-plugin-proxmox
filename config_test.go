@@ -1,7 +1,6 @@
 package proxmox
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -27,11 +26,10 @@ func TestDefaultStateFileIsScopedToConfig(t *testing.T) {
 		IPPoolRanges:  []string{"10.10.20.100-10.10.20.199"},
 	}
 
-	err := cfg.validate(provider.Settings{})
-	require.NoError(t, err)
+	cfg.applyDefaults(provider.Settings{})
 	require.Equal(
 		t,
-		filepath.Join(os.TempDir(), Version.Name, "default-gitlab-runners1-runner1-state.json"),
+		filepath.Join(defaultStateDir, "default-gitlab-runners1-runner1-state.json"),
 		cfg.StateFile,
 	)
 }
