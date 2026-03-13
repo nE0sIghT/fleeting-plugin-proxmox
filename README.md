@@ -114,7 +114,7 @@ Unless stated otherwise, the options below belong to `[runners.autoscaler.plugin
 | `ip_pool_gateway` | IPv4 string | for `static` |  | IPv4 gateway used for static allocation. |
 | `ip_pool_ranges` | range string or list | no | full subnet minus reserved addresses | Optional address ranges within `ip_pool_network`, for example `10.10.20.100-10.10.20.199`. |
 | `ip_pool_exclude` | IPv4 string or list | no |  | Optional excluded addresses. |
-| `ip_pool_reuse_cooldown` | duration string | no | `10m` | Cooldown before a released static IP can be reused. |
+| `ip_pool_reuse_cooldown` | duration string | no | `0s` | Cooldown before a released static IP can be reused. |
 | `state_file` | path string | no | `/var/lib/fleeting-plugin-proxmox/<cluster>-<pool>-<name_prefix>-state.json` | Persistent allocator state file. |
 
 #### Guest agent and metadata

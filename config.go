@@ -21,7 +21,7 @@ const (
 	defaultStartTimeout      = 5 * time.Minute
 	defaultShutdownTimeout   = 2 * time.Minute
 	defaultAgentTimeout      = 3 * time.Minute
-	defaultIPReuseCooldown   = 10 * time.Minute
+	defaultIPReuseCooldown   = 0 * time.Second
 	defaultStateDir          = "/var/lib/fleeting-plugin-proxmox"
 	defaultStateFileBasename = "state.json"
 )
