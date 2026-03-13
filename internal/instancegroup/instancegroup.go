@@ -191,6 +191,10 @@ func (g *Group) Init(ctx context.Context) error {
 	g.templateDisk = templateDisk
 	g.logEffectiveTopology()
 
+	if err := g.cleanupPreexistingStopped(ctx, resources); err != nil {
+		return err
+	}
+
 	managed, err := g.List(ctx)
 	if err != nil {
 		return err
@@ -208,6 +212,37 @@ func (g *Group) Init(ctx context.Context) error {
 	}
 
 	return g.pool.Reconcile(ctx, active)
+}
+
+func (g *Group) cleanupPreexistingStopped(ctx context.Context, resources []proxmoxclient.ClusterResource) error {
+	for _, resource := range resources {
+		if !g.isManaged(resource) {
+			continue
+		}
+		if resource.Status != "stopped" && resource.Status != "paused" {
+			continue
+		}
+
+		instance := ManagedInstance{
+			ID:    instanceID(resource.Node, resource.VMID),
+			Node:  resource.Node,
+			VMID:  resource.VMID,
+			Name:  resource.Name,
+			State: provider.StateDeleting,
+		}
+
+		g.log.Warn("deleting preexisting stopped instance", "instance", instance.ID, "status", resource.Status)
+		if err := g.safeDestroyManagedVM(ctx, instance); err != nil {
+			return fmt.Errorf("delete preexisting stopped instance %s: %w", instance.ID, err)
+		}
+		if g.pool != nil {
+			if err := g.pool.Forget(ctx, instance.ID); err != nil {
+				return fmt.Errorf("forget lease for %s: %w", instance.ID, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {

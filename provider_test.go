@@ -441,6 +441,49 @@ func TestCloneRollbackDoesNotDeleteForeignVM(t *testing.T) {
 	require.Equal(t, "foreign-pool", foreign.Pool)
 }
 
+func TestInitDeletesPreexistingStoppedManagedInstances(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.vms[5000] = mockVM{
+		Node:     "node1",
+		VMID:     5000,
+		Name:     "runner-5000",
+		Pool:     "ci",
+		Tags:     "managed-by-fleeting-plugin-proxmox;fleeting-group-runner",
+		Status:   "stopped",
+		Storage:  "ceph-vm",
+		BootDisk: mock.template.BootDisk,
+		DiskDef:  mock.template.DiskDef,
+		MemoryMB: mock.template.MemoryMB,
+		CPUCores: mock.template.CPUCores,
+		DiskMB:   mock.template.DiskMB,
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node1"}
+	group.NetworkMode = "static"
+	group.IPPoolNetwork = "10.10.20.0/24"
+	group.IPPoolGateway = "10.10.20.1"
+	group.IPPoolRanges = LaxStringList{"10.10.20.100-10.10.20.101"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+	require.Empty(t, mock.vms)
+}
+
 func TestTargetStoragePlacementIgnoresNodeRootFS(t *testing.T) {
 	t.Parallel()
 
