@@ -29,7 +29,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Test
-        run: go test ./...
+        run: make test
 
       - name: Build binary
         env:
@@ -37,14 +37,17 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          mkdir -p dist
           BIN="fleeting-plugin-proxmox"
           OUT="${BIN}-${GOOS}-${GOARCH}"
-          go build -trimpath -ldflags="-s -w -X 'gitlab.com/gitlab-org/fleeting/plugins/proxmox.VERSION=${GITHUB_REF_NAME#v}' -X 'gitlab.com/gitlab-org/fleeting/plugins/proxmox.REFERENCE=${GITHUB_REF_NAME}' -X 'gitlab.com/gitlab-org/fleeting/plugins/proxmox.REVISION=${GITHUB_SHA}' -X 'gitlab.com/gitlab-org/fleeting/plugins/proxmox.BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)'" -o "dist/${OUT}" ./cmd/fleeting-plugin-proxmox
+          make clean
+          make build
+          mv "dist/${BIN}" "dist/${OUT}"
           tar -C dist -czf "dist/${OUT}.tar.gz" "${OUT}"
+          sha256sum "dist/${OUT}.tar.gz" > "dist/${OUT}.tar.gz.sha256"
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
+            dist/*.tar.gz.sha256
