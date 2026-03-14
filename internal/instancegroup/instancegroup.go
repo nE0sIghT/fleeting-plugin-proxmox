@@ -25,6 +25,10 @@ type Config struct {
 	ClusterName           string
 	Pool                  string
 	TemplateVMIDs         []int
+	TemplateStageMode     string
+	TemplateVMIDMin       int
+	TemplateVMIDMax       int
+	TemplateNamePrefix    string
 	VMIDMin               int
 	VMIDMax               int
 	NamePrefix            string
@@ -37,6 +41,7 @@ type Config struct {
 	VMDiskMB              int64
 	VMDiskDevice          string
 	MandatoryTags         []string
+	ManagedTemplateTags   []string
 	DescriptionTemplate   string
 	CloudInitInterface    string
 	NetworkMode           string
@@ -134,6 +139,20 @@ type templateChoice struct {
 	StorageNodes map[string]struct{}
 }
 
+type ManagedTemplate struct {
+	ID         string
+	Node       string
+	VMID       int
+	Name       string
+	SourceVMID int
+	Storage    string
+}
+
+const (
+	sourceTemplateVersionKey = "template-version"
+	stagedTemplateVersionKey = "source-template-version"
+)
+
 func New(client *proxmoxclient.Client, log hclog.Logger, cfg Config, pool *ippool.Pool, cloneLimiter, startLimiter, deleteLimiter *limiter.Limiter) *Group {
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	return &Group{
@@ -164,7 +183,6 @@ func (g *Group) Init(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-
 	templateResources, err := g.findTemplates(resources)
 	if err != nil {
 		return err
@@ -184,6 +202,17 @@ func (g *Group) Init(ctx context.Context) error {
 	templateStorageNodes, err := g.loadTemplateStorageNodes(ctx, templateResources, storageResources)
 	if err != nil {
 		return err
+	}
+
+	if g.cfg.TemplateStageMode != "off" {
+		templateResources, err = g.stageTemplates(ctx, templateResources, templateStorageNodes)
+		if err != nil {
+			return err
+		}
+		templateStorageNodes, err = g.loadTemplateStorageNodes(ctx, templateResources, storageResources)
+		if err != nil {
+			return err
+		}
 	}
 
 	templatesByNode, templateSizing, templateDisk, err := g.resolveNodeTemplates(ctx, templateResources, templateStorageNodes)
@@ -248,6 +277,329 @@ func (g *Group) cleanupPreexistingStopped(ctx context.Context, resources []proxm
 		}
 	}
 
+	return nil
+}
+
+func (g *Group) findManagedTemplateResources(resources []proxmoxclient.ClusterResource) []ManagedTemplate {
+	out := make([]ManagedTemplate, 0)
+	for _, resource := range resources {
+		if !g.isManagedTemplate(resource) {
+			continue
+		}
+		out = append(out, ManagedTemplate{
+			ID:      instanceID(resource.Node, resource.VMID),
+			Node:    resource.Node,
+			VMID:    resource.VMID,
+			Name:    resource.Name,
+			Storage: resource.Storage,
+		})
+	}
+	return out
+}
+
+func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.ClusterResource, storageNodes map[int]map[string]struct{}) ([]proxmoxclient.ClusterResource, error) {
+	resources, err := g.client.ListClusterResources(ctx, "vm")
+	if err != nil {
+		return nil, err
+	}
+	localTemplateByNode := map[string]templateChoice{}
+	byVMID := make(map[int]proxmoxclient.ClusterResource, len(templates))
+	sourceVersions := map[int]string{}
+	for _, template := range templates {
+		config, err := g.client.GetVMConfig(ctx, template.Node, template.VMID)
+		if err != nil {
+			return nil, fmt.Errorf("read template config %d: %w", template.VMID, err)
+		}
+		diskDevice, err := g.resolveDiskDevice(config)
+		if err != nil {
+			return nil, fmt.Errorf("resolve template disk device for %d: %w", template.VMID, err)
+		}
+		storageName, err := extractStorageName(config.DiskValue(diskDevice))
+		if err != nil {
+			return nil, fmt.Errorf("resolve template storage for %d: %w", template.VMID, err)
+		}
+		localTemplateByNode[template.Node] = templateChoice{
+			Resource:     template,
+			Storage:      storageName,
+			StorageNodes: storageNodes[template.VMID],
+		}
+		byVMID[template.VMID] = template
+		sourceVersions[template.VMID] = descriptionValue(config.Description, sourceTemplateVersionKey)
+	}
+
+	plans := make([]ManagedTemplate, 0)
+	usedVMIDs := map[int]struct{}{}
+	for _, template := range templates {
+		usedVMIDs[template.VMID] = struct{}{}
+	}
+	existingTemplates := make(map[string]existingManagedTemplate)
+	existingOrder := make([]existingManagedTemplate, 0)
+	for _, template := range g.findManagedTemplateResources(resources) {
+		config, err := g.client.GetVMConfig(ctx, template.Node, template.VMID)
+		if err != nil {
+			return nil, fmt.Errorf("read managed template config %s: %w", template.ID, err)
+		}
+		sourceVMID, ok := parseManagedTemplateSourceVMID(template.Name)
+		if !ok {
+			return nil, fmt.Errorf("managed template %s has unexpected name format", template.ID)
+		}
+		template.SourceVMID = sourceVMID
+		state := existingManagedTemplate{
+			ManagedTemplate: template,
+			Resource:        proxmoxclient.ClusterResource{ID: template.ID, Node: template.Node, VMID: template.VMID, Name: template.Name, Storage: template.Storage, Pool: g.cfg.Pool, Tags: strings.Join(g.cfg.ManagedTemplateTags, ";"), Template: 1, Type: "qemu"},
+			Version:         descriptionValue(config.Description, stagedTemplateVersionKey),
+		}
+		for _, resource := range resources {
+			if resource.Node == template.Node && resource.VMID == template.VMID {
+				state.Resource = resource
+				break
+			}
+		}
+		existingTemplates[managedTemplateKey(template.Node, sourceVMID)] = state
+		existingOrder = append(existingOrder, state)
+	}
+	keepTemplates := map[string]ManagedTemplate{}
+
+	for _, node := range g.cfg.Nodes {
+		if _, ok := localTemplateByNode[node]; ok {
+			continue
+		}
+
+		var sourceChoice templateChoice
+		found := false
+		for _, template := range templates {
+			choice := localTemplateByNode[template.Node]
+			if choice.Resource.Node == node {
+				continue
+			}
+			if !storageAllowsNode(choice.StorageNodes, node) {
+				continue
+			}
+			sourceChoice = choice
+			found = true
+			break
+		}
+		if !found {
+			if g.cfg.TemplateStageMode == "required" {
+				return nil, fmt.Errorf("node %s has no stageable template source", node)
+			}
+			continue
+		}
+		if g.cfg.TemplateVMIDMin == 0 || g.cfg.TemplateVMIDMax == 0 {
+			return nil, fmt.Errorf("template staging is required for at least one node, but template_vmid_range is not configured")
+		}
+		sourceVersion := sourceVersions[sourceChoice.Resource.VMID]
+		if existing, ok := existingTemplates[managedTemplateKey(node, sourceChoice.Resource.VMID)]; ok && shouldReuseManagedTemplate(sourceVersion, existing.Version) {
+			templates = append(templates, existing.Resource)
+			keepTemplates[existing.ID] = existing.ManagedTemplate
+			usedVMIDs[existing.VMID] = struct{}{}
+			continue
+		}
+
+		vmid, err := g.allocateManagedTemplateVMID(usedVMIDs)
+		if err != nil {
+			return nil, err
+		}
+		usedVMIDs[vmid] = struct{}{}
+		plans = append(plans, ManagedTemplate{
+			ID:         instanceID(node, vmid),
+			Node:       node,
+			VMID:       vmid,
+			Name:       fmt.Sprintf("%s-%s-%d", g.cfg.TemplateNamePrefix, node, sourceChoice.Resource.VMID),
+			SourceVMID: sourceChoice.Resource.VMID,
+			Storage:    sourceChoice.Storage,
+		})
+	}
+
+	for _, existing := range existingOrder {
+		if _, keep := keepTemplates[existing.ID]; keep {
+			continue
+		}
+		g.log.Warn("deleting preexisting managed template", "template", existing.ID)
+		if err := g.destroyManagedTemplate(ctx, existing.ManagedTemplate, false); err != nil {
+			return nil, fmt.Errorf("delete managed template %s: %w", existing.ID, err)
+		}
+	}
+
+	for _, staged := range plans {
+		source := byVMID[staged.SourceVMID]
+		if err := g.createManagedTemplate(ctx, source, staged, sourceVersions[staged.SourceVMID]); err != nil {
+			g.cleanupFailedManagedTemplate(staged)
+			return nil, err
+		}
+		resource, err := g.waitManagedTemplateResource(ctx, staged)
+		if err != nil {
+			g.cleanupFailedManagedTemplate(staged)
+			return nil, err
+		}
+		templates = append(templates, resource)
+	}
+
+	return templates, nil
+}
+
+func (g *Group) createManagedTemplate(ctx context.Context, source proxmoxclient.ClusterResource, staged ManagedTemplate, sourceVersion string) error {
+	mode := "full"
+	targetStorage := staged.Storage
+	if g.supportsLinkedClone(staged.Storage) {
+		mode = "linked"
+		targetStorage = ""
+	}
+
+	g.log.Info("staging managed template", "template", staged.ID, "source_vmid", source.VMID, "source_node", source.Node, "storage", staged.Storage, "clone_mode", mode)
+
+	cloneCtx, cancel := context.WithTimeout(ctx, g.cfg.CloneTimeout)
+	defer cancel()
+
+	upid, err := g.client.CloneVM(cloneCtx, source.Node, source.VMID, proxmoxclient.CloneRequest{
+		NewID:         staged.VMID,
+		Name:          staged.Name,
+		TargetNode:    staged.Node,
+		Pool:          g.cfg.Pool,
+		TargetStorage: targetStorage,
+		Full:          mode == "full",
+		Snapshot:      g.cfg.CloneSnapshot,
+	})
+	if err != nil {
+		return fmt.Errorf("clone staged template from %d to %s: %w", source.VMID, staged.ID, err)
+	}
+	if err := g.client.WaitForTask(cloneCtx, source.Node, upid, g.cfg.TaskPollInterval); err != nil {
+		return fmt.Errorf("wait staged template clone %s: %w", staged.ID, err)
+	}
+
+	description := stagedTemplateDescription(staged.Node, staged.SourceVMID, sourceVersion)
+	upid, err = g.client.SetVMConfig(cloneCtx, staged.Node, staged.VMID, proxmoxclient.SetConfigRequest{
+		Tags:        g.cfg.ManagedTemplateTags,
+		Description: description,
+	})
+	if err != nil {
+		return fmt.Errorf("tag staged template %s: %w", staged.ID, err)
+	}
+	if err := g.client.WaitForTask(cloneCtx, staged.Node, upid, g.cfg.TaskPollInterval); err != nil {
+		return fmt.Errorf("wait staged template config %s: %w", staged.ID, err)
+	}
+
+	status, err := g.client.GetVMStatus(cloneCtx, staged.Node, staged.VMID)
+	if err == nil && status.Status == "running" {
+		if err := g.ensureVMStopped(cloneCtx, staged.Node, staged.VMID); err != nil {
+			return fmt.Errorf("stop staged template %s: %w", staged.ID, err)
+		}
+	}
+
+	upid, err = g.client.ConvertVMToTemplate(cloneCtx, staged.Node, staged.VMID)
+	if err != nil {
+		return fmt.Errorf("convert staged template %s: %w", staged.ID, err)
+	}
+	if err := g.client.WaitForTask(cloneCtx, staged.Node, upid, g.cfg.TaskPollInterval); err != nil {
+		return fmt.Errorf("wait convert staged template %s: %w", staged.ID, err)
+	}
+
+	return nil
+}
+
+func (g *Group) cleanupFailedManagedTemplate(template ManagedTemplate) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), g.cfg.ShutdownTimeout)
+	defer cancel()
+
+	if err := g.destroyManagedTemplate(cleanupCtx, template, true); err != nil {
+		g.log.Warn("failed to clean up staged template after error", "template", template.ID, "error", err)
+	}
+}
+
+type existingManagedTemplate struct {
+	ManagedTemplate
+	Resource proxmoxclient.ClusterResource
+	Version  string
+}
+
+func (g *Group) lookupManagedTemplateResource(ctx context.Context, node string, vmid int) (proxmoxclient.ClusterResource, bool, error) {
+	resources, err := g.client.ListClusterResources(ctx, "vm")
+	if err != nil {
+		return proxmoxclient.ClusterResource{}, false, err
+	}
+	for _, resource := range resources {
+		if resource.Node != node || resource.VMID != vmid {
+			continue
+		}
+		if !g.isManagedTemplate(resource) {
+			return proxmoxclient.ClusterResource{}, false, nil
+		}
+		return resource, true, nil
+	}
+	return proxmoxclient.ClusterResource{}, false, nil
+}
+
+func (g *Group) lookupTemplateResource(ctx context.Context, template ManagedTemplate) (proxmoxclient.ClusterResource, error) {
+	resource, found, err := g.lookupManagedTemplateResource(ctx, template.Node, template.VMID)
+	if err != nil {
+		return proxmoxclient.ClusterResource{}, err
+	}
+	if !found {
+		return proxmoxclient.ClusterResource{}, fmt.Errorf("staged template %s/%d is not found as managed template", template.Node, template.VMID)
+	}
+	return resource, nil
+}
+
+func (g *Group) waitManagedTemplateResource(ctx context.Context, template ManagedTemplate) (proxmoxclient.ClusterResource, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, g.cfg.CloneTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(g.cfg.TaskPollInterval)
+	defer ticker.Stop()
+
+	for {
+		resource, err := g.lookupTemplateResource(waitCtx, template)
+		if err == nil {
+			return resource, nil
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return proxmoxclient.ClusterResource{}, err
+		case <-ticker.C:
+		}
+	}
+}
+
+func (g *Group) allocateManagedTemplateVMID(used map[int]struct{}) (int, error) {
+	for vmid := g.cfg.TemplateVMIDMin; vmid <= g.cfg.TemplateVMIDMax; vmid++ {
+		if _, exists := used[vmid]; exists {
+			continue
+		}
+		return vmid, nil
+	}
+	return 0, fmt.Errorf("no free VMID in configured template_vmid_range")
+}
+
+func (g *Group) destroyManagedTemplate(ctx context.Context, template ManagedTemplate, allowPartial bool) error {
+	config, found, err := g.lookupVMConfig(ctx, template.Node, template.VMID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	if allowPartial {
+		if template.VMID < g.cfg.TemplateVMIDMin || template.VMID > g.cfg.TemplateVMIDMax {
+			return fmt.Errorf("refusing to delete failed staged template %s/%d outside configured template_vmid_range", template.Node, template.VMID)
+		}
+		if config.Name != template.Name {
+			return fmt.Errorf("refusing to delete failed staged template %s/%d with unexpected name %q", template.Node, template.VMID, config.Name)
+		}
+	} else if !g.isManagedTemplateConfig(template.VMID, config) {
+		return fmt.Errorf("refusing to delete non-managed template %s/%d", template.Node, template.VMID)
+	}
+
+	upid, err := g.client.DeleteVM(ctx, template.Node, template.VMID)
+	if err != nil {
+		return err
+	}
+	if err := g.client.WaitForTask(ctx, template.Node, upid, g.cfg.TaskPollInterval); err != nil {
+		if isMissingManagedTemplateAfterDelete(err) {
+			return nil
+		}
+		return err
+	}
 	return nil
 }
 
@@ -1509,6 +1861,88 @@ func (g *Group) isManaged(resource proxmoxclient.ClusterResource) bool {
 	}
 
 	return true
+}
+
+func (g *Group) isManagedTemplate(resource proxmoxclient.ClusterResource) bool {
+	if resource.Type != "qemu" {
+		return false
+	}
+	if resource.Pool != g.cfg.Pool {
+		return false
+	}
+	return resource.Template == 1 && g.isManagedTemplateIdentity(resource.VMID, resource.Name, resource.Tags)
+}
+
+func (g *Group) isManagedTemplateConfig(vmid int, config proxmoxclient.VMConfig) bool {
+	return g.isManagedTemplateIdentity(vmid, config.Name, config.Tags)
+}
+
+func isMissingManagedTemplateAfterDelete(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "Configuration file") && strings.Contains(message, "does not exist")
+}
+
+func (g *Group) isManagedTemplateIdentity(vmid int, name, tags string) bool {
+	if vmid < g.cfg.TemplateVMIDMin || vmid > g.cfg.TemplateVMIDMax {
+		return false
+	}
+	if !strings.HasPrefix(name, g.cfg.TemplateNamePrefix+"-") {
+		return false
+	}
+
+	tagSet := parseTags(tags)
+	for _, tag := range g.cfg.ManagedTemplateTags {
+		if _, ok := tagSet[tag]; !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func managedTemplateKey(node string, sourceVMID int) string {
+	return fmt.Sprintf("%s/%d", node, sourceVMID)
+}
+
+func parseManagedTemplateSourceVMID(name string) (int, bool) {
+	if !strings.Contains(name, "-") {
+		return 0, false
+	}
+	last := name[strings.LastIndex(name, "-")+1:]
+	vmid, err := strconv.Atoi(last)
+	if err != nil {
+		return 0, false
+	}
+	return vmid, true
+}
+
+func descriptionValue(description, key string) string {
+	prefix := key + "="
+	for _, line := range strings.Split(description, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+func stagedTemplateDescription(node string, sourceVMID int, sourceVersion string) string {
+	description := fmt.Sprintf("Managed staged template for node %s from source template %d", node, sourceVMID)
+	if sourceVersion == "" {
+		return description
+	}
+	return description + "\n" + stagedTemplateVersionKey + "=" + sourceVersion
+}
+
+func shouldReuseManagedTemplate(sourceVersion, stagedVersion string) bool {
+	return sourceVersion == "" || sourceVersion == stagedVersion
 }
 
 func (g *Group) renderDescription(node string, vmid int, ip netip.Addr) (string, error) {

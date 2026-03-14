@@ -11,7 +11,7 @@ check_interval = 3
   # For Docker-on-ephemeral-VM workloads, see examples/docker-autoscaler.config.toml.
 
   [runners.autoscaler]
-    plugin = "/usr/local/bin/fleeting-plugin-proxmox"
+    plugin = "fleeting-plugin-proxmox"
     capacity_per_instance = 1
     max_use_count = 1
     max_instances = 20
@@ -25,6 +25,8 @@ check_interval = 3
     cluster_name = "prod-pve"
     pool = "gitlab-ci"
     template_vmids = [9000]
+    template_stage_mode = "auto"
+    template_vmid_range = "510000-510099"
     name_prefix = "glr"
     vmid_range = "500000-500999"
     nodes = ["pve01", "pve02"]
@@ -54,7 +56,7 @@ check_interval = 3
     ip_pool_gateway = "10.10.20.1"
     ip_pool_ranges = ["10.10.20.100-10.10.20.199"]
     ip_pool_exclude = ["10.10.20.150"]
-    ip_pool_reuse_cooldown = "10m"
+    ip_pool_reuse_cooldown = "0s"
     state_file = "/var/lib/fleeting-plugin-proxmox/prod-pve-gitlab-ci-glr-state.json"
 
     # For DHCP-based provisioning instead:

@@ -16,6 +16,7 @@ import (
 const (
 	defaultCloneMode         = "auto"
 	defaultNetworkMode       = "static"
+	defaultTemplateStageMode = "auto"
 	defaultTaskPollInterval  = 2 * time.Second
 	defaultCloneTimeout      = 10 * time.Minute
 	defaultStartTimeout      = 5 * time.Minute
@@ -40,6 +41,9 @@ type pluginConfig struct {
 	ClusterName           string        `json:"cluster_name"`
 	Pool                  string        `json:"pool"`
 	TemplateVMIDs         []int         `json:"template_vmids"`
+	TemplateStageMode     string        `json:"template_stage_mode"`
+	TemplateVMIDRange     string        `json:"template_vmid_range"`
+	TemplateNamePrefix    string        `json:"template_name_prefix"`
 	NamePrefix            string        `json:"name_prefix"`
 	VMIDRange             string        `json:"vmid_range"`
 	Nodes                 LaxStringList `json:"nodes"`
@@ -89,15 +93,16 @@ type pluginConfig struct {
 	Tags                LaxStringList `json:"tags"`
 	DescriptionTemplate string        `json:"description_template"`
 
-	parsedVMIDRange       vmidRange
-	parsedTaskPoll        time.Duration
-	parsedCloneTimeout    time.Duration
-	parsedStartTimeout    time.Duration
-	parsedShutdownTimeout time.Duration
-	parsedAgentTimeout    time.Duration
-	parsedIPReuseCooldown time.Duration
-	parsedPoolPrefix      netip.Prefix
-	parsedGateway         netip.Addr
+	parsedVMIDRange         vmidRange
+	parsedTemplateVMIDRange vmidRange
+	parsedTaskPoll          time.Duration
+	parsedCloneTimeout      time.Duration
+	parsedStartTimeout      time.Duration
+	parsedShutdownTimeout   time.Duration
+	parsedAgentTimeout      time.Duration
+	parsedIPReuseCooldown   time.Duration
+	parsedPoolPrefix        netip.Prefix
+	parsedGateway           netip.Addr
 }
 
 func (g *InstanceGroup) config() *pluginConfig {
@@ -111,8 +116,14 @@ func (c *pluginConfig) applyDefaults(settings provider.Settings) {
 	if c.CloneMode == "" {
 		c.CloneMode = defaultCloneMode
 	}
+	if c.TemplateStageMode == "" {
+		c.TemplateStageMode = defaultTemplateStageMode
+	}
 	if c.NetworkMode == "" {
 		c.NetworkMode = defaultNetworkMode
+	}
+	if c.TemplateNamePrefix == "" && c.NamePrefix != "" {
+		c.TemplateNamePrefix = c.NamePrefix + "-template"
 	}
 	if c.MaxParallelClones <= 0 {
 		c.MaxParallelClones = 2
@@ -194,6 +205,9 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	if c.CloneMode != "auto" && c.CloneMode != "linked" && c.CloneMode != "full" {
 		errs = append(errs, fmt.Errorf("invalid clone_mode: %s", c.CloneMode))
 	}
+	if c.TemplateStageMode != "off" && c.TemplateStageMode != "auto" && c.TemplateStageMode != "required" {
+		errs = append(errs, fmt.Errorf("invalid template_stage_mode: %s", c.TemplateStageMode))
+	}
 	if c.VMMemoryMB < 0 {
 		errs = append(errs, fmt.Errorf("vm_memory_mb must be >= 0"))
 	}
@@ -226,6 +240,14 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	}
 
 	c.parsedVMIDRange = parseVMIDRange(c.VMIDRange, &errs)
+	if c.TemplateVMIDRange != "" {
+		c.parsedTemplateVMIDRange = parseVMIDRange(c.TemplateVMIDRange, &errs)
+		if c.parsedTemplateVMIDRange.Min <= c.parsedVMIDRange.Max && c.parsedTemplateVMIDRange.Max >= c.parsedVMIDRange.Min {
+			errs = append(errs, fmt.Errorf("template_vmid_range must not overlap vmid_range"))
+		}
+	} else if c.TemplateStageMode == "required" {
+		errs = append(errs, fmt.Errorf("missing required plugin config when template_stage_mode=required: template_vmid_range"))
+	}
 
 	seenTemplateVMIDs := map[int]struct{}{}
 	for _, vmid := range c.TemplateVMIDs {
@@ -310,6 +332,10 @@ func (c *pluginConfig) applyEnv() {
 func (c *pluginConfig) mandatoryTags() []string {
 	tagGroup := sanitizeTag("fleeting-group-" + c.NamePrefix)
 	return append([]string{"managed-by-fleeting-plugin-proxmox", tagGroup}, c.Tags...)
+}
+
+func (c *pluginConfig) managedTemplateTags() []string {
+	return []string{"managed-by-fleeting-plugin-proxmox", "managed-role-template-stage"}
 }
 
 func (c *pluginConfig) flattenRanges() []string {
