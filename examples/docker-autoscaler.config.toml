@@ -16,7 +16,7 @@ check_interval = 3
     shm_size = 0
 
   [runners.autoscaler]
-    plugin = "/usr/local/bin/fleeting-plugin-proxmox"
+    plugin = "fleeting-plugin-proxmox"
     capacity_per_instance = 1
     max_use_count = 1
     max_instances = 20
@@ -30,6 +30,8 @@ check_interval = 3
     cluster_name = "prod-pve"
     pool = "gitlab-ci"
     template_vmids = [9000]
+    template_stage_mode = "auto"
+    template_vmid_range = "511000-511099"
     name_prefix = "glr-docker"
     vmid_range = "501000-501999"
     nodes = ["pve01", "pve02"]

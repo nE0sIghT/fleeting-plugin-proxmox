@@ -311,6 +311,10 @@ func (c *Client) StopVM(ctx context.Context, node string, vmid int) (string, err
 	return c.postString(ctx, path.Join("/nodes", node, "qemu", fmt.Sprintf("%d", vmid), "status", "stop"), nil)
 }
 
+func (c *Client) ConvertVMToTemplate(ctx context.Context, node string, vmid int) (string, error) {
+	return c.postString(ctx, path.Join("/nodes", node, "qemu", fmt.Sprintf("%d", vmid), "template"), nil)
+}
+
 func (c *Client) DeleteVM(ctx context.Context, node string, vmid int) (string, error) {
 	form := url.Values{}
 	form.Set("purge", "1")

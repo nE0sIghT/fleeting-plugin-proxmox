@@ -14,6 +14,14 @@ This plugin provisions ephemeral Proxmox VMs for GitLab Runner Fleeting and has 
 
 Tested against Proxmox VE 8 and Proxmox VE 9.
 
+### Template Placement
+
+The plugin supports multi-node runner layouts where each node must clone runner VMs onto its own local storage.
+
+When `template_stage_mode` is enabled, the plugin prepares managed per-node staged templates during `Init()` and clones runner VMs from them.
+
+This works around the Proxmox VE limitation that, even with a template on shared storage, runner VMs still cannot be provisioned directly onto each node's own local storage in a multi-node layout.
+
 ## Build and Install
 
 Use the repository `Makefile`:
@@ -69,6 +77,9 @@ Unless stated otherwise, the options below belong to `[runners.autoscaler.plugin
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `template_vmids` | int list | yes |  | Source QEMU template VMIDs. The plugin prefers a template already local to the selected node. |
+| `template_stage_mode` | enum | no | `auto` | One of `off`, `auto`, or `required`. The default enables managed staged templates automatically when needed. |
+| `template_vmid_range` | string | required for `required`, or for `auto` if staging is needed |  | Dedicated VMID range in `start-end` form for managed staged templates. Must not overlap `vmid_range`. |
+| `template_name_prefix` | string | no | `<name_prefix>-template` | Prefix used for managed staged template names. |
 | `clone_mode` | enum | no | `auto` | One of `auto`, `linked`, or `full`. |
 | `target_storages` | string or list | no |  | Datastore allowlist. |
 | `clone_snapshot` | string | no |  | Optional snapshot name used when cloning from the template. |
@@ -76,6 +87,8 @@ Unless stated otherwise, the options below belong to `[runners.autoscaler.plugin
 | `vm_cpu_cores` | int | no | template value | Optional vCPU override. |
 | `vm_disk_mb` | int64 | no | template value | Optional absolute primary disk size in MiB. Must not be smaller than the template disk. |
 | `vm_disk_device` | string | no | autodetect | Optional explicit disk device for `vm_disk_mb`, for example `scsi0`. |
+
+With `template_stage_mode` enabled, the plugin works around the Proxmox limitation that a configured source template cannot always be cloned directly for every allowed node. It does that by cloning the source template into a managed temporary template on the affected node during `Init()`, then using that staged template for subsequent VM provisioning on that node.
 
 #### Placement and concurrency
 
@@ -139,6 +152,24 @@ The plugin only manages VMs that satisfy all of the following:
 This prevents accidental cleanup of unrelated workloads on the same hypervisor.
 You still need to grant only the minimum required Proxmox privileges. The plugin is conservative about managed VM identity, but it cannot compensate for an over-privileged API token.
 
+When `template_stage_mode` is enabled, the plugin also manages temporary staged templates. They are identified separately from runner VMs by:
+
+- the configured Proxmox pool
+- the dedicated `template_vmid_range`
+- the configured `template_name_prefix`
+- fixed internal tags for template staging
+
+Managed staged templates are reused across restarts by default.
+
+If you want the fleet to rebuild staged templates after changing a gold template, add or update a `template-version=<value>` line in that gold template's `description`. For example:
+
+```text
+# bump when replacing the template disk
+template-version=2
+```
+
+When `template-version` is absent, existing staged templates are reused as-is. When it changes, the plugin rebuilds the affected staged templates from the updated gold template.
+
 ### Required RBAC groups
 
 One practical way to split Proxmox privileges for this plugin is into three roles.
@@ -182,6 +213,7 @@ Notes:
 - `Sys.Audit` is retained in the pool role for practical compatibility across PVE 8 and 9 deployments
 - `SDN.Use` is required on the `localnetwork/<bridge>` path used by the template NIC
 - the plugin does not configure the VM bridge; bridge and SDN attachment come from the template NIC
+- if `template_stage_mode` is enabled, the same pool role also needs access to create, convert, and delete the managed staged templates inside the configured `template_vmid_range`
 
 ### Node reserve semantics
 
@@ -227,6 +259,8 @@ Minimal shape:
     cluster_name = "prod-pve"
     pool = "gitlab-ci"
     template_vmids = [9000]
+    template_stage_mode = "auto"
+    template_vmid_range = "510000-510099"
     name_prefix = "glr"
     vmid_range = "500000-500999"
     nodes = ["pve01", "pve02"]
@@ -251,6 +285,7 @@ See [`examples/docker-autoscaler.config.toml`](/workspace/fleeting-plugin-proxmo
 
 - The template VM should already have Cloud-Init and QEMU guest agent enabled.
 - Use a dedicated Proxmox pool and a dedicated VMID range.
+- If `template_stage_mode` is enabled, also reserve a separate `template_vmid_range` for managed staged templates.
 - Use a subnet dedicated to ephemeral runner VMs. Do not share it with manually managed VMs.
 - `network_mode = "dhcp"` skips the local IP allocator and requires the guest agent to report the acquired address.
 - For `docker-autoscaler`, the template VM must already contain a working Docker Engine configuration suitable for GitLab Runner.

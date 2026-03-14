@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/proxmoxclient"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/scheduler"
 )
 
@@ -114,4 +115,63 @@ func TestPendingReservationsAffectNextPlanningPass(t *testing.T) {
 	selected, err := group.cfg.Scheduler.Select(candidates, scheduler.Reserve{}, req)
 	require.NoError(t, err)
 	require.Equal(t, "node2", selected.Name)
+}
+
+func TestIsManagedTemplate(t *testing.T) {
+	t.Parallel()
+
+	group := &Group{
+		cfg: Config{
+			Pool:                "ci",
+			TemplateVMIDMin:     510000,
+			TemplateVMIDMax:     510999,
+			TemplateNamePrefix:  "glf-template",
+			ManagedTemplateTags: []string{"managed-by-fleeting-plugin-proxmox", "managed-role-template-stage"},
+		},
+	}
+
+	require.True(t, group.isManagedTemplate(proxmoxclient.ClusterResource{
+		Type:     "qemu",
+		Template: 1,
+		Pool:     "ci",
+		VMID:     510123,
+		Name:     "glf-template-pve2-2001",
+		Tags:     "managed-by-fleeting-plugin-proxmox;managed-role-template-stage",
+	}))
+
+	require.False(t, group.isManagedTemplate(proxmoxclient.ClusterResource{
+		Type:     "qemu",
+		Template: 1,
+		Pool:     "ci",
+		VMID:     500123,
+		Name:     "glf-template-pve2-2001",
+		Tags:     "managed-by-fleeting-plugin-proxmox;managed-role-template-stage",
+	}))
+
+	require.False(t, group.isManagedTemplate(proxmoxclient.ClusterResource{
+		Type:     "qemu",
+		Template: 1,
+		Pool:     "ci",
+		VMID:     510123,
+		Name:     "glf-template-pve2-2001",
+		Tags:     "managed-by-fleeting-plugin-proxmox",
+	}))
+}
+
+func TestDescriptionValueIgnoresComments(t *testing.T) {
+	t.Parallel()
+
+	description := "# bump when replacing disk\ntemplate-version=2\nother=value"
+	require.Equal(t, "2", descriptionValue(description, sourceTemplateVersionKey))
+	require.Equal(t, "", descriptionValue(description, stagedTemplateVersionKey))
+}
+
+func TestShouldReuseManagedTemplate(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, shouldReuseManagedTemplate("", ""))
+	require.True(t, shouldReuseManagedTemplate("", "1"))
+	require.True(t, shouldReuseManagedTemplate("2", "2"))
+	require.False(t, shouldReuseManagedTemplate("2", "1"))
+	require.False(t, shouldReuseManagedTemplate("2", ""))
 }

@@ -352,6 +352,7 @@ func TestProviderLifecycle(t *testing.T) {
 			group.ClusterName = "lab"
 			group.Pool = "ci"
 			group.TemplateVMIDs = []int{9000}
+			group.TemplateStageMode = "off"
 			group.NamePrefix = "runner"
 			group.VMIDRange = "5000-5005"
 			group.Nodes = LaxStringList{"node1"}
@@ -433,6 +434,7 @@ func TestCloneRollbackDoesNotDeleteForeignVM(t *testing.T) {
 	group.ClusterName = "lab"
 	group.Pool = "ci"
 	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
@@ -489,6 +491,7 @@ func TestInitDeletesPreexistingStoppedManagedInstances(t *testing.T) {
 	group.ClusterName = "lab"
 	group.Pool = "ci"
 	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
@@ -519,6 +522,7 @@ func TestIncreaseReturnsAfterRequestsAreAccepted(t *testing.T) {
 	group.ClusterName = "lab"
 	group.Pool = "ci"
 	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
@@ -558,6 +562,7 @@ func TestTargetStoragePlacementIgnoresNodeRootFS(t *testing.T) {
 	group.ClusterName = "lab"
 	group.Pool = "ci"
 	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
@@ -605,6 +610,7 @@ func TestTargetStorageMustExistOnSelectedNode(t *testing.T) {
 	group.ClusterName = "lab"
 	group.Pool = "ci"
 	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
@@ -648,6 +654,7 @@ func TestInitFailsWhenNodeHasNoLocalTemplateAndNoSharedTargetStorage(t *testing.
 	group.ClusterName = "lab"
 	group.Pool = "ci"
 	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node2"}
@@ -694,6 +701,7 @@ func TestSharedTemplateFallbackUsesFullCloneOnSharedTemplateStorage(t *testing.T
 	group.ClusterName = "lab"
 	group.Pool = "ci"
 	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node2"}
@@ -750,6 +758,7 @@ func TestLinkedCloneModeFailsInitWithoutLocalTemplate(t *testing.T) {
 	group.ClusterName = "lab"
 	group.Pool = "ci"
 	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node2"}
@@ -790,6 +799,7 @@ func TestAutoCloneModeFallsBackToFullForUnsupportedStoragePluginType(t *testing.
 	group.ClusterName = "lab"
 	group.Pool = "ci"
 	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1"}
@@ -845,6 +855,7 @@ func TestIncreaseSkipsUnavailableNodeAfterInit(t *testing.T) {
 	group.ClusterName = "lab"
 	group.Pool = "ci"
 	group.TemplateVMIDs = []int{9000, 9001}
+	group.TemplateStageMode = "off"
 	group.NamePrefix = "runner"
 	group.VMIDRange = "5000-5005"
 	group.Nodes = LaxStringList{"node1", "node2"}
