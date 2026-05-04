@@ -1,6 +1,7 @@
 package proxmox
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -103,10 +104,35 @@ type pluginConfig struct {
 	parsedIPReuseCooldown   time.Duration
 	parsedPoolPrefix        netip.Prefix
 	parsedGateway           netip.Addr
+	agentRequiredSet        bool
 }
 
 func (g *InstanceGroup) config() *pluginConfig {
 	return &g.pluginConfig
+}
+
+func (c *pluginConfig) UnmarshalJSON(data []byte) error {
+	type rawPluginConfig pluginConfig
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	decoded := rawPluginConfig(*c)
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	*c = pluginConfig(decoded)
+	if value, ok := raw["agent_required"]; ok {
+		c.agentRequiredSet = true
+		if err := json.Unmarshal(value, &c.AgentRequired); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (c *pluginConfig) applyDefaults(settings provider.Settings) {
@@ -152,10 +178,10 @@ func (c *pluginConfig) applyDefaults(settings provider.Settings) {
 	if c.IPPoolReuseCooldown == "" {
 		c.IPPoolReuseCooldown = defaultIPReuseCooldown.String()
 	}
-	if c.StateFile == "" {
+	if c.NetworkMode == "static" && c.StateFile == "" {
 		c.StateFile = filepath.Join(defaultStateDir, defaultStateFileName(c.ClusterName, c.Pool, c.NamePrefix))
 	}
-	if !c.AgentRequired {
+	if !c.agentRequiredSet {
 		c.AgentRequired = true
 	}
 	if c.AgentTimeout == "" {
@@ -217,6 +243,15 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	if c.VMDiskMB < 0 {
 		errs = append(errs, fmt.Errorf("vm_disk_mb must be >= 0"))
 	}
+	if c.NodeReserveMemoryMB < 0 {
+		errs = append(errs, fmt.Errorf("node_reserve_memory_mb must be >= 0"))
+	}
+	if c.NodeReserveCPUCores < 0 {
+		errs = append(errs, fmt.Errorf("node_reserve_cpu_cores must be >= 0"))
+	}
+	if c.NodeReserveDiskGB < 0 {
+		errs = append(errs, fmt.Errorf("node_reserve_disk_gb must be >= 0"))
+	}
 	if c.NodeReserveMemoryPercent < 0 || c.NodeReserveMemoryPercent > 100 {
 		errs = append(errs, fmt.Errorf("node_reserve_memory_percent must be between 0 and 100"))
 	}
@@ -234,6 +269,9 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	}
 	if c.NetworkMode == "dhcp" && !c.AgentRequired {
 		errs = append(errs, fmt.Errorf("network_mode=dhcp requires agent_required=true"))
+	}
+	if len(c.TargetStorages) == 0 && (c.NodeReserveDiskGB > 0 || c.NodeReserveDiskPercent > 0) {
+		errs = append(errs, fmt.Errorf("node_reserve_disk requires target_storages"))
 	}
 	if c.PreferIPv6 {
 		errs = append(errs, fmt.Errorf("prefer_ipv6 is unsupported in v1"))
@@ -262,12 +300,12 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 		seenTemplateVMIDs[vmid] = struct{}{}
 	}
 
-	c.parsedTaskPoll = parseDurationField("task_poll_interval", c.TaskPollInterval, &errs)
-	c.parsedCloneTimeout = parseDurationField("clone_timeout", c.CloneTimeout, &errs)
-	c.parsedStartTimeout = parseDurationField("start_timeout", c.StartTimeout, &errs)
-	c.parsedShutdownTimeout = parseDurationField("shutdown_timeout", c.ShutdownTimeout, &errs)
-	c.parsedAgentTimeout = parseDurationField("agent_timeout", c.AgentTimeout, &errs)
-	c.parsedIPReuseCooldown = parseDurationField("ip_pool_reuse_cooldown", c.IPPoolReuseCooldown, &errs)
+	c.parsedTaskPoll = parsePositiveDurationField("task_poll_interval", c.TaskPollInterval, &errs)
+	c.parsedCloneTimeout = parsePositiveDurationField("clone_timeout", c.CloneTimeout, &errs)
+	c.parsedStartTimeout = parsePositiveDurationField("start_timeout", c.StartTimeout, &errs)
+	c.parsedShutdownTimeout = parsePositiveDurationField("shutdown_timeout", c.ShutdownTimeout, &errs)
+	c.parsedAgentTimeout = parsePositiveDurationField("agent_timeout", c.AgentTimeout, &errs)
+	c.parsedIPReuseCooldown = parseNonNegativeDurationField("ip_pool_reuse_cooldown", c.IPPoolReuseCooldown, &errs)
 
 	if c.NetworkMode == "static" {
 		if c.IPPoolNetwork == "" {
@@ -314,8 +352,10 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(c.StateFile), 0o755); err != nil {
-		errs = append(errs, fmt.Errorf("prepare state_file directory: %w", err))
+	if c.NetworkMode == "static" {
+		if err := os.MkdirAll(filepath.Dir(c.StateFile), 0o755); err != nil {
+			errs = append(errs, fmt.Errorf("prepare state_file directory: %w", err))
+		}
 	}
 
 	return errors.Join(errs...)
@@ -361,6 +401,22 @@ func parseDurationField(name, value string, errs *[]error) time.Duration {
 	d, err := time.ParseDuration(value)
 	if err != nil {
 		*errs = append(*errs, fmt.Errorf("invalid %s: %w", name, err))
+	}
+	return d
+}
+
+func parsePositiveDurationField(name, value string, errs *[]error) time.Duration {
+	d := parseDurationField(name, value, errs)
+	if d <= 0 {
+		*errs = append(*errs, fmt.Errorf("%s must be > 0", name))
+	}
+	return d
+}
+
+func parseNonNegativeDurationField(name, value string, errs *[]error) time.Duration {
+	d := parseDurationField(name, value, errs)
+	if d < 0 {
+		*errs = append(*errs, fmt.Errorf("%s must be >= 0", name))
 	}
 	return d
 }

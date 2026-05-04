@@ -1,6 +1,7 @@
 package instancegroup
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -174,4 +175,31 @@ func TestShouldReuseManagedTemplate(t *testing.T) {
 	require.True(t, shouldReuseManagedTemplate("2", "2"))
 	require.False(t, shouldReuseManagedTemplate("2", "1"))
 	require.False(t, shouldReuseManagedTemplate("2", ""))
+}
+
+func TestIncreaseIgnoresNonPositiveDelta(t *testing.T) {
+	t.Parallel()
+
+	group := &Group{}
+
+	ids, err := group.Increase(context.Background(), 0)
+	require.NoError(t, err)
+	require.Empty(t, ids)
+
+	ids, err = group.Increase(context.Background(), -1)
+	require.NoError(t, err)
+	require.Empty(t, ids)
+}
+
+func TestAllocateManagedTemplateVMIDSkipsUsedVMIDs(t *testing.T) {
+	t.Parallel()
+
+	group := &Group{cfg: Config{TemplateVMIDMin: 510000, TemplateVMIDMax: 510002}}
+
+	vmid, err := group.allocateManagedTemplateVMID(map[int]struct{}{
+		510000: {},
+		510001: {},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 510002, vmid)
 }

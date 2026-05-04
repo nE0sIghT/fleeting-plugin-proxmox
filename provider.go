@@ -159,6 +159,9 @@ func (g *InstanceGroup) Update(ctx context.Context, update func(instance string,
 }
 
 func (g *InstanceGroup) Increase(ctx context.Context, delta int) (int, error) {
+	if delta <= 0 {
+		return 0, nil
+	}
 	created, err := g.group.Increase(ctx, delta)
 	return len(created), err
 }

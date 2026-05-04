@@ -104,6 +104,20 @@ func newMockProxmox() *mockProxmox {
 	}
 }
 
+func TestIncreaseIgnoresNonPositiveDelta(t *testing.T) {
+	t.Parallel()
+
+	group := &InstanceGroup{}
+
+	count, err := group.Increase(context.Background(), 0)
+	require.NoError(t, err)
+	require.Zero(t, count)
+
+	count, err = group.Increase(context.Background(), -1)
+	require.NoError(t, err)
+	require.Zero(t, count)
+}
+
 func (m *mockProxmox) handler(t *testing.T) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

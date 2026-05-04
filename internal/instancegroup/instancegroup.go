@@ -329,8 +329,10 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 
 	plans := make([]ManagedTemplate, 0)
 	usedVMIDs := map[int]struct{}{}
-	for _, template := range templates {
-		usedVMIDs[template.VMID] = struct{}{}
+	for _, resource := range resources {
+		if resource.VMID > 0 {
+			usedVMIDs[resource.VMID] = struct{}{}
+		}
 	}
 	existingTemplates := make(map[string]existingManagedTemplate)
 	existingOrder := make([]existingManagedTemplate, 0)
@@ -646,6 +648,10 @@ func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {
 }
 
 func (g *Group) Increase(ctx context.Context, delta int) ([]string, error) {
+	if delta <= 0 {
+		return nil, nil
+	}
+
 	plans, planErr := g.planIncrease(ctx, delta)
 	if len(plans) == 0 {
 		return nil, planErr
