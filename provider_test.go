@@ -559,6 +559,56 @@ func TestIncreaseReturnsAfterRequestsAreAccepted(t *testing.T) {
 	require.Less(t, elapsed, 150*time.Millisecond)
 }
 
+func TestFailedAsyncProvisioningReportsDeletedAfterCreating(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.failClone = true
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node1"}
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"ceph-vm"}
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
+
+	count, err := group.Increase(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	states := map[string]provider.State{}
+	require.NoError(t, group.Update(context.Background(), func(instance string, state provider.State) {
+		states[instance] = state
+	}))
+	require.Equal(t, provider.StateCreating, states["node1/5000"])
+
+	require.Eventually(t, func() bool {
+		states = map[string]provider.State{}
+		err = group.Update(context.Background(), func(instance string, state provider.State) {
+			states[instance] = state
+		})
+		require.NoError(t, err)
+		return states["node1/5000"] == provider.StateDeleted
+	}, 500*time.Millisecond, 25*time.Millisecond)
+}
+
 func TestTargetStoragePlacementIgnoresNodeRootFS(t *testing.T) {
 	t.Parallel()
 

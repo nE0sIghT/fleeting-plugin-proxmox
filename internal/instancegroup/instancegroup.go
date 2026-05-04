@@ -84,6 +84,7 @@ type Group struct {
 	mu sync.Mutex
 	// transient overrides smooth out state transitions while long-running Proxmox tasks complete.
 	transient       map[string]provider.State
+	accepted        map[string]acceptedProvision
 	pendingByNode   map[string]pendingReservation
 	pendingVMIDs    map[int]struct{}
 	templatesByNode map[string]templateChoice
@@ -118,6 +119,13 @@ type pendingReservation struct {
 	MemoryMB  float64
 	CPUCores  float64
 	StorageGB map[string]float64
+}
+
+type acceptedProvision struct {
+	Node             string
+	VMID             int
+	State            provider.State
+	ReportedCreating bool
 }
 
 type nodePlanState struct {
@@ -166,6 +174,7 @@ func New(client *proxmoxclient.Client, log hclog.Logger, cfg Config, pool *ippoo
 		runCtx:        runCtx,
 		cancelRun:     cancelRun,
 		transient:     map[string]provider.State{},
+		accepted:      map[string]acceptedProvision{},
 		pendingByNode: map[string]pendingReservation{},
 		pendingVMIDs:  map[int]struct{}{},
 	}
@@ -612,6 +621,7 @@ func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {
 	}
 
 	instances := make([]ManagedInstance, 0)
+	seen := map[string]struct{}{}
 	for _, resource := range resources {
 		if !g.isManaged(resource) {
 			continue
@@ -619,8 +629,10 @@ func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {
 
 		state := mapState(resource.Status)
 		id := instanceID(resource.Node, resource.VMID)
+		seen[id] = struct{}{}
 
 		g.mu.Lock()
+		delete(g.accepted, id)
 		if transient, ok := g.transient[id]; ok {
 			state = transient
 		}
@@ -644,6 +656,34 @@ func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {
 		instances = append(instances, instance)
 	}
 
+	g.mu.Lock()
+	for id, accepted := range g.accepted {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+
+		state := accepted.State
+		if state == provider.StateCreating {
+			accepted.ReportedCreating = true
+			g.accepted[id] = accepted
+		} else if !accepted.ReportedCreating {
+			state = provider.StateCreating
+			accepted.ReportedCreating = true
+			g.accepted[id] = accepted
+		} else if state == provider.StateDeleted || state == provider.StateTimeout {
+			delete(g.accepted, id)
+		}
+
+		instances = append(instances, ManagedInstance{
+			ID:    id,
+			Node:  accepted.Node,
+			VMID:  accepted.VMID,
+			Name:  fmt.Sprintf("%s-%d", g.cfg.NamePrefix, accepted.VMID),
+			State: state,
+		})
+	}
+	g.mu.Unlock()
+
 	return instances, nil
 }
 
@@ -659,6 +699,7 @@ func (g *Group) Increase(ctx context.Context, delta int) ([]string, error) {
 
 	for _, plan := range plans {
 		id := instanceID(plan.Node, plan.VMID)
+		g.acceptProvision(plan)
 		g.setTransient(id, provider.StateCreating)
 		g.provisionWg.Add(1)
 		go func(plan provisionPlan, id string) {
@@ -666,6 +707,7 @@ func (g *Group) Increase(ctx context.Context, delta int) ([]string, error) {
 			defer g.releasePendingPlan(plan)
 
 			if _, err := g.provisionOne(g.runCtx, plan); err != nil {
+				g.failAcceptedProvision(plan)
 				g.log.Error("provisioning failed", "instance", id, "error", err)
 			}
 		}(plan, id)
@@ -1495,6 +1537,35 @@ func (g *Group) releasePendingPlan(plan provisionPlan) {
 	}
 
 	delete(g.pendingVMIDs, plan.VMID)
+}
+
+func (g *Group) acceptProvision(plan provisionPlan) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	id := instanceID(plan.Node, plan.VMID)
+	g.accepted[id] = acceptedProvision{
+		Node:  plan.Node,
+		VMID:  plan.VMID,
+		State: provider.StateCreating,
+	}
+}
+
+func (g *Group) failAcceptedProvision(plan provisionPlan) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	id := instanceID(plan.Node, plan.VMID)
+	accepted, ok := g.accepted[id]
+	if !ok {
+		accepted = acceptedProvision{
+			Node:             plan.Node,
+			VMID:             plan.VMID,
+			ReportedCreating: true,
+		}
+	}
+	accepted.State = provider.StateDeleted
+	g.accepted[id] = accepted
 }
 
 func storageAllowsNode(nodes map[string]struct{}, node string) bool {
