@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -518,9 +519,9 @@ func decodeResponse(resp *http.Response, out any) error {
 	}
 	if resp.StatusCode >= 400 {
 		if resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("%w: %s", ErrNotFound, strings.TrimSpace(string(body)))
+			return fmt.Errorf("%w: %s", ErrNotFound, proxmoxAPIErrorDetails(resp, body))
 		}
-		return fmt.Errorf("proxmox api error: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("proxmox api error: %s", proxmoxAPIErrorDetails(resp, body))
 	}
 
 	var raw envelope[json.RawMessage]
@@ -534,4 +535,23 @@ func decodeResponse(resp *http.Response, out any) error {
 		return fmt.Errorf("decode response data: %w", err)
 	}
 	return nil
+}
+
+func proxmoxAPIErrorDetails(resp *http.Response, body []byte) string {
+	parts := []string{fmt.Sprintf("status=%d", resp.StatusCode)}
+	if message := proxmoxStatusMessage(resp); message != "" {
+		parts = append(parts, fmt.Sprintf("status_message=%q", message))
+	}
+	if bodyText := strings.TrimSpace(string(body)); bodyText != "" {
+		parts = append(parts, fmt.Sprintf("body=%s", bodyText))
+	}
+	return strings.Join(parts, " ")
+}
+
+func proxmoxStatusMessage(resp *http.Response) string {
+	message := strings.TrimSpace(strings.TrimPrefix(resp.Status, strconv.Itoa(resp.StatusCode)))
+	if message == "" || message == http.StatusText(resp.StatusCode) {
+		return ""
+	}
+	return message
 }

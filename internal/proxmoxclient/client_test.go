@@ -8,11 +8,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +73,19 @@ func TestClientRejectsCertificateOutsideAPIHostAndConfiguredNodes(t *testing.T) 
 
 	_, err = client.GetVersion(context.Background())
 	require.ErrorContains(t, err, "certificate is not valid for api_url host or configured nodes")
+}
+
+func TestDecodeResponseIncludesProxmoxStatusMessage(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Status:     "500 storage 'ceph-vm' does not support linked clones",
+		Body:       io.NopCloser(strings.NewReader(`{"data":null}`)),
+	}
+
+	err := decodeResponse(resp, nil)
+	require.ErrorContains(t, err, "status=500")
+	require.ErrorContains(t, err, `status_message="storage 'ceph-vm' does not support linked clones"`)
+	require.ErrorContains(t, err, `body={"data":null}`)
 }
 
 func newTestTLSServer(t *testing.T, cert tls.Certificate) *httptest.Server {
