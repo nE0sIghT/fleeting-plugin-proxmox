@@ -25,6 +25,7 @@ type Config struct {
 	TokenSecret        string
 	TLSCAFile          string
 	InsecureSkipVerify bool
+	AllowedServerNames []string
 }
 
 type Client struct {
@@ -177,6 +178,7 @@ func New(cfg Config) (*Client, error) {
 		}
 		tlsConfig.RootCAs = pool
 	}
+	configureTLSVerification(baseURL, cfg, tlsConfig)
 
 	return &Client{
 		baseURL: baseURL,
@@ -188,6 +190,73 @@ func New(cfg Config) (*Client, error) {
 		},
 		authHeader: fmt.Sprintf("PVEAPIToken=%s=%s", cfg.TokenID, cfg.TokenSecret),
 	}, nil
+}
+
+func configureTLSVerification(baseURL *url.URL, cfg Config, tlsConfig *tls.Config) {
+	if cfg.InsecureSkipVerify || len(cfg.AllowedServerNames) == 0 {
+		return
+	}
+
+	allowedNames := tlsAllowedServerNames(baseURL.Hostname(), cfg.AllowedServerNames)
+	if len(allowedNames) == 0 {
+		return
+	}
+
+	roots := tlsConfig.RootCAs
+	tlsConfig.InsecureSkipVerify = true
+	tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+		return verifyTLSConnection(state, roots, allowedNames)
+	}
+}
+
+func tlsAllowedServerNames(apiHost string, nodeNames []string) []string {
+	seen := make(map[string]struct{}, len(nodeNames)+1)
+	names := make([]string, 0, len(nodeNames)+1)
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+
+	add(apiHost)
+	for _, nodeName := range nodeNames {
+		add(nodeName)
+	}
+	return names
+}
+
+func verifyTLSConnection(state tls.ConnectionState, roots *x509.CertPool, allowedNames []string) error {
+	if len(state.PeerCertificates) == 0 {
+		return errors.New("tls: server did not provide a certificate")
+	}
+
+	leaf := state.PeerCertificates[0]
+	intermediates := x509.NewCertPool()
+	for _, cert := range state.PeerCertificates[1:] {
+		intermediates.AddCert(cert)
+	}
+
+	_, err := leaf.Verify(x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, name := range allowedNames {
+		if err := leaf.VerifyHostname(name); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("tls: certificate is not valid for api_url host or configured nodes: allowed names %s", strings.Join(allowedNames, ", "))
 }
 
 func (c *Client) GetVersion(ctx context.Context) (Version, error) {

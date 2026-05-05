@@ -61,6 +61,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		TokenSecret:        g.TokenSecret,
 		TLSCAFile:          g.TLSCAFile,
 		InsecureSkipVerify: g.TLSInsecureSkipVerify,
+		AllowedServerNames: []string(g.Nodes),
 	})
 	if err != nil {
 		return provider.ProviderInfo{}, err
