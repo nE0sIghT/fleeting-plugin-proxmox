@@ -158,6 +158,13 @@ type ManagedTemplate struct {
 	Storage    string
 }
 
+type managedTemplateStageMethod string
+
+const (
+	managedTemplateStageDirectClone  managedTemplateStageMethod = "direct_clone"
+	managedTemplateStageCloneMigrate managedTemplateStageMethod = "clone_migrate"
+)
+
 const (
 	sourceTemplateVersionKey = "template-version"
 	stagedTemplateVersionKey = "source-template-version"
@@ -294,18 +301,33 @@ func (g *Group) cleanupPreexistingStopped(ctx context.Context, resources []proxm
 	return nil
 }
 
-func (g *Group) findManagedTemplateResources(resources []proxmoxclient.ClusterResource) []ManagedTemplate {
-	out := make([]ManagedTemplate, 0)
+type managedTemplateArtifact struct {
+	ManagedTemplate
+	Resource proxmoxclient.ClusterResource
+	Complete bool
+}
+
+func (g *Group) findManagedTemplateArtifacts(resources []proxmoxclient.ClusterResource) []managedTemplateArtifact {
+	out := make([]managedTemplateArtifact, 0)
 	for _, resource := range resources {
-		if !g.isManagedTemplate(resource) {
+		if !g.isPotentialManagedTemplateArtifact(resource) {
 			continue
 		}
-		out = append(out, ManagedTemplate{
-			ID:      instanceID(resource.Node, resource.VMID),
-			Node:    resource.Node,
-			VMID:    resource.VMID,
-			Name:    resource.Name,
-			Storage: resource.Storage,
+		sourceVMID, ok := parseManagedTemplateSourceVMID(resource.Name)
+		if !ok {
+			continue
+		}
+		out = append(out, managedTemplateArtifact{
+			ManagedTemplate: ManagedTemplate{
+				ID:         instanceID(resource.Node, resource.VMID),
+				Node:       resource.Node,
+				VMID:       resource.VMID,
+				Name:       resource.Name,
+				SourceVMID: sourceVMID,
+				Storage:    resource.Storage,
+			},
+			Resource: resource,
+			Complete: g.isManagedTemplate(resource),
 		})
 	}
 	return out
@@ -344,34 +366,34 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 
 	existingTemplates := make(map[string]existingManagedTemplate)
 	existingOrder := make([]existingManagedTemplate, 0)
-	for _, template := range g.findManagedTemplateResources(resources) {
+	existingArtifacts := make(map[string]existingManagedTemplate)
+	for _, artifact := range g.findManagedTemplateArtifacts(resources) {
+		template := artifact.ManagedTemplate
 		config, err := g.client.GetVMConfig(ctx, template.Node, template.VMID)
 		if err != nil {
 			return nil, fmt.Errorf("read managed template config %s: %w", template.ID, err)
 		}
-		sourceVMID, ok := parseManagedTemplateSourceVMID(template.Name)
-		if !ok {
-			return nil, fmt.Errorf("managed template %s has unexpected name format", template.ID)
-		}
-		template.SourceVMID = sourceVMID
 		state := existingManagedTemplate{
-			ManagedTemplate: template,
-			Resource:        proxmoxclient.ClusterResource{ID: template.ID, Node: template.Node, VMID: template.VMID, Name: template.Name, Storage: template.Storage, Pool: g.cfg.Pool, Tags: strings.Join(g.cfg.ManagedTemplateTags, ";"), Template: 1, Type: "qemu"},
-			Version:         descriptionValue(config.Description, stagedTemplateVersionKey),
+			ManagedTemplate:    template,
+			Resource:           artifact.Resource,
+			Version:            descriptionValue(config.Description, stagedTemplateVersionKey),
+			AllowPartialDelete: !artifact.Complete,
 		}
-		for _, resource := range resources {
-			if resource.Node == template.Node && resource.VMID == template.VMID {
-				state.Resource = resource
-				break
-			}
+		existingArtifacts[template.ID] = state
+		if artifact.Complete {
+			existingTemplates[managedTemplateKey(template.Node, template.SourceVMID)] = state
 		}
-		existingTemplates[managedTemplateKey(template.Node, sourceVMID)] = state
 		existingOrder = append(existingOrder, state)
 	}
 	keepTemplates := map[string]ManagedTemplate{}
 	type stageRequest struct {
 		node   string
 		source templateChoice
+		method managedTemplateStageMethod
+	}
+	type stagePlan struct {
+		ManagedTemplate
+		method managedTemplateStageMethod
 	}
 	stageRequests := make([]stageRequest, 0)
 
@@ -380,26 +402,10 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 			continue
 		}
 
-		var sourceChoice templateChoice
-		found := false
-		for _, template := range templates {
-			choice := localTemplateByNode[template.Node]
-			if choice.Resource.Node == node {
-				continue
-			}
-			if !choice.StorageShared {
-				continue
-			}
-			if !storageAllowsNode(choice.StorageNodes, node) {
-				continue
-			}
-			sourceChoice = choice
-			found = true
-			break
-		}
+		sourceChoice, stageMethod, found := selectStageSource(templates, localTemplateByNode, node)
 		if !found {
 			if g.cfg.TemplateStageMode == "required" {
-				return nil, fmt.Errorf("node %s has no stageable template source; cross-node staging requires shared template storage", node)
+				return nil, fmt.Errorf("node %s has no stageable template source; cross-node staging requires shared template storage or matching target storage", node)
 			}
 			continue
 		}
@@ -416,6 +422,7 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 		stageRequests = append(stageRequests, stageRequest{
 			node:   node,
 			source: sourceChoice,
+			method: stageMethod,
 		})
 	}
 
@@ -424,8 +431,8 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 		if resource.VMID <= 0 {
 			continue
 		}
-		// Obsolete managed templates are deleted before new staging, so their VMIDs are reusable.
-		if g.isManagedTemplate(resource) {
+		// Obsolete managed template artifacts are deleted before new staging, so their VMIDs are reusable.
+		if _, ok := existingArtifacts[instanceID(resource.Node, resource.VMID)]; ok {
 			if _, keep := keepTemplates[instanceID(resource.Node, resource.VMID)]; !keep {
 				continue
 			}
@@ -433,20 +440,23 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 		usedVMIDs[resource.VMID] = struct{}{}
 	}
 
-	plans := make([]ManagedTemplate, 0, len(stageRequests))
+	plans := make([]stagePlan, 0, len(stageRequests))
 	for _, request := range stageRequests {
 		vmid, err := g.allocateManagedTemplateVMID(usedVMIDs)
 		if err != nil {
 			return nil, err
 		}
 		usedVMIDs[vmid] = struct{}{}
-		plans = append(plans, ManagedTemplate{
-			ID:         instanceID(request.node, vmid),
-			Node:       request.node,
-			VMID:       vmid,
-			Name:       fmt.Sprintf("%s-%s-%d", g.cfg.TemplateNamePrefix, request.node, request.source.Resource.VMID),
-			SourceVMID: request.source.Resource.VMID,
-			Storage:    request.source.Storage,
+		plans = append(plans, stagePlan{
+			ManagedTemplate: ManagedTemplate{
+				ID:         instanceID(request.node, vmid),
+				Node:       request.node,
+				VMID:       vmid,
+				Name:       fmt.Sprintf("%s-%s-%d", g.cfg.TemplateNamePrefix, request.node, request.source.Resource.VMID),
+				SourceVMID: request.source.Resource.VMID,
+				Storage:    request.source.Storage,
+			},
+			method: request.method,
 		})
 	}
 
@@ -455,20 +465,21 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 			continue
 		}
 		g.log.Warn("deleting preexisting managed template", "template", existing.ID)
-		if err := g.destroyManagedTemplate(ctx, existing.ManagedTemplate, false); err != nil {
+		if err := g.destroyManagedTemplate(ctx, existing.ManagedTemplate, existing.AllowPartialDelete); err != nil {
 			return nil, fmt.Errorf("delete managed template %s: %w", existing.ID, err)
 		}
 	}
 
-	for _, staged := range plans {
+	for _, stagedPlan := range plans {
+		staged := stagedPlan.ManagedTemplate
 		source := byVMID[staged.SourceVMID]
-		if err := g.createManagedTemplate(ctx, source, staged, sourceVersions[staged.SourceVMID]); err != nil {
-			g.cleanupFailedManagedTemplate(staged)
+		if err := g.createManagedTemplate(ctx, source, staged, stagedPlan.method, sourceVersions[staged.SourceVMID]); err != nil {
+			g.cleanupFailedManagedTemplate(staged, source.Node)
 			return nil, err
 		}
 		resource, err := g.waitManagedTemplateResource(ctx, staged)
 		if err != nil {
-			g.cleanupFailedManagedTemplate(staged)
+			g.cleanupFailedManagedTemplate(staged, source.Node)
 			return nil, err
 		}
 		templates = append(templates, resource)
@@ -477,7 +488,46 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 	return templates, nil
 }
 
-func (g *Group) createManagedTemplate(ctx context.Context, source proxmoxclient.ClusterResource, staged ManagedTemplate, sourceVersion string) error {
+func selectStageSource(templates []proxmoxclient.ClusterResource, choicesByNode map[string]templateChoice, targetNode string) (templateChoice, managedTemplateStageMethod, bool) {
+	for _, template := range templates {
+		choice := choicesByNode[template.Node]
+		if choice.Resource.Node == targetNode {
+			continue
+		}
+		if !choice.StorageShared {
+			continue
+		}
+		if !storageAllowsNode(choice.StorageNodes, targetNode) {
+			continue
+		}
+		return choice, managedTemplateStageDirectClone, true
+	}
+
+	for _, template := range templates {
+		choice := choicesByNode[template.Node]
+		if choice.Resource.Node == targetNode {
+			continue
+		}
+		if choice.StorageShared {
+			continue
+		}
+		if len(choice.StorageNodes) == 0 {
+			continue
+		}
+		if !storageAllowsNode(choice.StorageNodes, targetNode) {
+			continue
+		}
+		return choice, managedTemplateStageCloneMigrate, true
+	}
+
+	return templateChoice{}, "", false
+}
+
+func (g *Group) createManagedTemplate(ctx context.Context, source proxmoxclient.ClusterResource, staged ManagedTemplate, method managedTemplateStageMethod, sourceVersion string) error {
+	if method == managedTemplateStageCloneMigrate {
+		return g.createManagedTemplateViaMigration(ctx, source, staged, sourceVersion)
+	}
+
 	mode := "full"
 	targetStorage := staged.Storage
 	if g.supportsLinkedClone(staged.Storage) {
@@ -536,19 +586,110 @@ func (g *Group) createManagedTemplate(ctx context.Context, source proxmoxclient.
 	return nil
 }
 
-func (g *Group) cleanupFailedManagedTemplate(template ManagedTemplate) {
+func (g *Group) createManagedTemplateViaMigration(ctx context.Context, source proxmoxclient.ClusterResource, staged ManagedTemplate, sourceVersion string) error {
+	g.log.Info("staging managed template via migration", "template", staged.ID, "source_vmid", source.VMID, "source_node", source.Node, "storage", staged.Storage, "clone_mode", "full")
+
+	cloneCtx, cancel := context.WithTimeout(ctx, g.cfg.CloneTimeout)
+	defer cancel()
+
+	sourceStaged := staged
+	sourceStaged.Node = source.Node
+	sourceStaged.ID = instanceID(source.Node, staged.VMID)
+
+	upid, err := g.client.CloneVM(cloneCtx, source.Node, source.VMID, proxmoxclient.CloneRequest{
+		NewID:         staged.VMID,
+		Name:          staged.Name,
+		TargetNode:    source.Node,
+		Pool:          g.cfg.Pool,
+		TargetStorage: staged.Storage,
+		Full:          true,
+		Snapshot:      g.cfg.CloneSnapshot,
+	})
+	if err != nil {
+		return fmt.Errorf("clone staged template locally from %d to %s: %w", source.VMID, sourceStaged.ID, err)
+	}
+	if err := g.client.WaitForTask(cloneCtx, source.Node, upid, g.cfg.TaskPollInterval); err != nil {
+		return fmt.Errorf("wait local staged template clone %s: %w", sourceStaged.ID, err)
+	}
+
+	description := stagedTemplateDescription(staged.Node, staged.SourceVMID, sourceVersion)
+	upid, err = g.client.SetVMConfig(cloneCtx, source.Node, staged.VMID, proxmoxclient.SetConfigRequest{
+		Tags:        g.cfg.ManagedTemplateTags,
+		Description: description,
+	})
+	if err != nil {
+		return fmt.Errorf("tag local staged template %s: %w", sourceStaged.ID, err)
+	}
+	if err := g.client.WaitForTask(cloneCtx, source.Node, upid, g.cfg.TaskPollInterval); err != nil {
+		return fmt.Errorf("wait local staged template config %s: %w", sourceStaged.ID, err)
+	}
+
+	status, err := g.client.GetVMStatus(cloneCtx, source.Node, staged.VMID)
+	if err == nil && status.Status == "running" {
+		if err := g.ensureVMStopped(cloneCtx, source.Node, staged.VMID); err != nil {
+			return fmt.Errorf("stop local staged template %s: %w", sourceStaged.ID, err)
+		}
+	}
+
+	upid, err = g.client.MigrateVM(cloneCtx, source.Node, staged.VMID, proxmoxclient.MigrateRequest{
+		TargetNode:    staged.Node,
+		TargetStorage: staged.Storage,
+	})
+	if err != nil {
+		return fmt.Errorf("migrate staged template %s to %s: %w", sourceStaged.ID, staged.Node, err)
+	}
+	if err := g.client.WaitForTask(cloneCtx, source.Node, upid, g.cfg.TaskPollInterval); err != nil {
+		return fmt.Errorf("wait staged template migration %s to %s: %w", sourceStaged.ID, staged.Node, err)
+	}
+
+	upid, err = g.client.SetVMConfig(cloneCtx, staged.Node, staged.VMID, proxmoxclient.SetConfigRequest{
+		Tags:        g.cfg.ManagedTemplateTags,
+		Description: description,
+	})
+	if err != nil {
+		return fmt.Errorf("tag migrated staged template %s: %w", staged.ID, err)
+	}
+	if err := g.client.WaitForTask(cloneCtx, staged.Node, upid, g.cfg.TaskPollInterval); err != nil {
+		return fmt.Errorf("wait migrated staged template config %s: %w", staged.ID, err)
+	}
+
+	upid, err = g.client.ConvertVMToTemplate(cloneCtx, staged.Node, staged.VMID)
+	if err != nil {
+		return fmt.Errorf("convert staged template %s: %w", staged.ID, err)
+	}
+	if err := g.client.WaitForTask(cloneCtx, staged.Node, upid, g.cfg.TaskPollInterval); err != nil {
+		return fmt.Errorf("wait convert staged template %s: %w", staged.ID, err)
+	}
+
+	return nil
+}
+
+func (g *Group) cleanupFailedManagedTemplate(template ManagedTemplate, extraNodes ...string) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), g.cfg.ShutdownTimeout)
 	defer cancel()
 
-	if err := g.destroyManagedTemplate(cleanupCtx, template, true); err != nil {
-		g.log.Warn("failed to clean up staged template after error", "template", template.ID, "error", err)
+	nodes := append([]string{template.Node}, extraNodes...)
+	seen := map[string]struct{}{}
+	for _, node := range nodes {
+		if _, ok := seen[node]; ok {
+			continue
+		}
+		seen[node] = struct{}{}
+
+		nodeTemplate := template
+		nodeTemplate.Node = node
+		nodeTemplate.ID = instanceID(node, template.VMID)
+		if err := g.destroyManagedTemplate(cleanupCtx, nodeTemplate, true); err != nil {
+			g.log.Warn("failed to clean up staged template after error", "template", nodeTemplate.ID, "error", err)
+		}
 	}
 }
 
 type existingManagedTemplate struct {
 	ManagedTemplate
-	Resource proxmoxclient.ClusterResource
-	Version  string
+	Resource           proxmoxclient.ClusterResource
+	Version            string
+	AllowPartialDelete bool
 }
 
 func (g *Group) lookupManagedTemplateResource(ctx context.Context, node string, vmid int) (proxmoxclient.ClusterResource, bool, error) {
@@ -624,6 +765,9 @@ func (g *Group) destroyManagedTemplate(ctx context.Context, template ManagedTemp
 		}
 		if config.Name != template.Name {
 			return fmt.Errorf("refusing to delete failed staged template %s/%d with unexpected name %q", template.Node, template.VMID, config.Name)
+		}
+		if config.Pool != "" && config.Pool != g.cfg.Pool {
+			return fmt.Errorf("refusing to delete failed staged template %s/%d from pool %q", template.Node, template.VMID, config.Pool)
 		}
 	} else if !g.isManagedTemplateConfig(template.VMID, config) {
 		return fmt.Errorf("refusing to delete non-managed template %s/%d", template.Node, template.VMID)
@@ -2009,6 +2153,20 @@ func (g *Group) isManagedTemplate(resource proxmoxclient.ClusterResource) bool {
 	return resource.Template == 1 && g.isManagedTemplateIdentity(resource.VMID, resource.Name, resource.Tags)
 }
 
+func (g *Group) isPotentialManagedTemplateArtifact(resource proxmoxclient.ClusterResource) bool {
+	if resource.Type != "qemu" {
+		return false
+	}
+	if resource.Pool != g.cfg.Pool {
+		return false
+	}
+	if !g.hasManagedTemplateVMIDAndName(resource.VMID, resource.Name) {
+		return false
+	}
+	_, ok := parseManagedTemplateSourceVMID(resource.Name)
+	return ok
+}
+
 func (g *Group) isManagedTemplateConfig(vmid int, config proxmoxclient.VMConfig) bool {
 	return g.isManagedTemplateIdentity(vmid, config.Name, config.Tags)
 }
@@ -2022,10 +2180,7 @@ func isMissingManagedTemplateAfterDelete(err error) bool {
 }
 
 func (g *Group) isManagedTemplateIdentity(vmid int, name, tags string) bool {
-	if vmid < g.cfg.TemplateVMIDMin || vmid > g.cfg.TemplateVMIDMax {
-		return false
-	}
-	if !strings.HasPrefix(name, g.cfg.TemplateNamePrefix+"-") {
+	if !g.hasManagedTemplateVMIDAndName(vmid, name) {
 		return false
 	}
 
@@ -2037,6 +2192,13 @@ func (g *Group) isManagedTemplateIdentity(vmid int, name, tags string) bool {
 	}
 
 	return true
+}
+
+func (g *Group) hasManagedTemplateVMIDAndName(vmid int, name string) bool {
+	if vmid < g.cfg.TemplateVMIDMin || vmid > g.cfg.TemplateVMIDMax {
+		return false
+	}
+	return strings.HasPrefix(name, g.cfg.TemplateNamePrefix+"-")
 }
 
 func managedTemplateKey(node string, sourceVMID int) string {

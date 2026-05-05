@@ -146,6 +146,11 @@ type CloneRequest struct {
 	Snapshot      string
 }
 
+type MigrateRequest struct {
+	TargetNode    string
+	TargetStorage string
+}
+
 type SetConfigRequest struct {
 	CloudInitInterface string
 	Tags               []string
@@ -318,6 +323,16 @@ func (c *Client) CloneVM(ctx context.Context, sourceNode string, templateVMID in
 		form.Set("snapname", req.Snapshot)
 	}
 	return c.postString(ctx, path.Join("/nodes", sourceNode, "qemu", fmt.Sprintf("%d", templateVMID), "clone"), form)
+}
+
+func (c *Client) MigrateVM(ctx context.Context, sourceNode string, vmid int, req MigrateRequest) (string, error) {
+	form := url.Values{}
+	form.Set("target", req.TargetNode)
+	form.Set("online", "0")
+	if req.TargetStorage != "" {
+		form.Set("targetstorage", req.TargetStorage)
+	}
+	return c.postString(ctx, path.Join("/nodes", sourceNode, "qemu", fmt.Sprintf("%d", vmid), "migrate"), form)
 }
 
 func (c *Client) SetVMConfig(ctx context.Context, node string, vmid int, req SetConfigRequest) (string, error) {

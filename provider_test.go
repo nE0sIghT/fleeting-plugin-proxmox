@@ -46,6 +46,8 @@ type mockProxmox struct {
 	taskNode                 map[string]string
 	cloneDelay               time.Duration
 	failClone                bool
+	failMigrate              bool
+	failConvert              bool
 	failLinkedCloneOnStorage map[string]bool
 	downNodes                map[string]bool
 	rootFSUsed               int64
@@ -230,6 +232,24 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 			m.taskNode["UPID:clone"] = "node1"
 			write("UPID:clone")
 			return
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/migrate"):
+			require.NoError(t, r.ParseForm())
+			if m.failMigrate {
+				w.WriteHeader(http.StatusInternalServerError)
+				write("migrate failed")
+				return
+			}
+			vmid := extractVMID(r.URL.Path)
+			vm := m.vms[vmid]
+			vm.Node = r.PostForm.Get("target")
+			if storage := r.PostForm.Get("targetstorage"); storage != "" {
+				vm.Storage = storage
+				vm.DiskDef = fmt.Sprintf("%s:vm-%d-disk-0,size=%dM", storage, vmid, vm.DiskMB)
+			}
+			m.vms[vmid] = vm
+			m.taskNode["UPID:migrate"] = path.Base(path.Dir(path.Dir(path.Dir(r.URL.Path))))
+			write("UPID:migrate")
+			return
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/config"):
 			require.NoError(t, r.ParseForm())
 			vmid := extractVMID(r.URL.Path)
@@ -285,6 +305,11 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 			write("UPID:stop")
 			return
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/template"):
+			if m.failConvert {
+				w.WriteHeader(http.StatusInternalServerError)
+				write("convert failed")
+				return
+			}
 			vmid := extractVMID(r.URL.Path)
 			vm := m.vms[vmid]
 			vm.Template = 1
@@ -760,7 +785,7 @@ func TestInitFailsWhenNodeHasNoLocalTemplateAndNoSharedTargetStorage(t *testing.
 	require.Contains(t, err.Error(), "node node2 has no usable template")
 }
 
-func TestManagedTemplateStagingRejectsNonSharedCrossNodeSource(t *testing.T) {
+func TestManagedTemplateStagingMigratesNonSharedCrossNodeSource(t *testing.T) {
 	t.Parallel()
 
 	mock := newMockProxmox()
@@ -809,9 +834,206 @@ func TestManagedTemplateStagingRejectsNonSharedCrossNodeSource(t *testing.T) {
 	group.StateFile = filepath.Join(t.TempDir(), "state.json")
 
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
+
+	vm, ok := mock.vms[510000]
+	require.True(t, ok)
+	require.Equal(t, "node2", vm.Node)
+	require.Equal(t, "fast-local", vm.Storage)
+	require.Equal(t, 1, vm.Template)
+	require.Equal(t, "runner-template-node2-9000", vm.Name)
+	require.Equal(t, "managed-by-fleeting-plugin-proxmox;managed-role-template-stage", vm.Tags)
+	require.Equal(t, "Managed staged template for node node2 from source template 9000", vm.Description)
+}
+
+func TestManagedTemplateStagingCleansMigratedPartialOnConvertFailure(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.failConvert = true
+	mock.template.DiskDef = "fast-local:vm-9000-disk-0,size=10G"
+	mock.storages = []map[string]any{
+		{
+			"type":    "storage",
+			"node":    "node1",
+			"storage": "fast-local",
+			"disk":    int64(50 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+		{
+			"type":    "storage",
+			"node":    "node2",
+			"storage": "fast-local",
+			"disk":    int64(50 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+	}
+	mock.storageCfgs["fast-local"] = map[string]any{
+		"storage": "fast-local",
+		"nodes":   []string{"node1", "node2"},
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "required"
+	group.TemplateVMIDRange = "510000-510010"
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node2"}
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"fast-local"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "convert staged template node2/510000")
+	require.NotContains(t, mock.vms, 510000)
+}
+
+func TestManagedTemplateStagingDeletesPreexistingPartialBeforeReuse(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.template.DiskDef = "fast-local:vm-9000-disk-0,size=10G"
+	mock.storages = []map[string]any{
+		{
+			"type":    "storage",
+			"node":    "node1",
+			"storage": "fast-local",
+			"disk":    int64(50 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+		{
+			"type":    "storage",
+			"node":    "node2",
+			"storage": "fast-local",
+			"disk":    int64(50 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+	}
+	mock.storageCfgs["fast-local"] = map[string]any{
+		"storage": "fast-local",
+		"nodes":   []string{"node1", "node2"},
+	}
+	mock.vms[510000] = mockVM{
+		Node:     "node1",
+		VMID:     510000,
+		Name:     "runner-template-node2-9000",
+		Pool:     "ci",
+		Storage:  "fast-local",
+		Status:   "stopped",
+		Template: 0,
+		BootDisk: mock.template.BootDisk,
+		DiskDef:  "fast-local:vm-510000-disk-0,size=10G",
+		MemoryMB: mock.template.MemoryMB,
+		CPUCores: mock.template.CPUCores,
+		DiskMB:   mock.template.DiskMB,
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "required"
+	group.TemplateVMIDRange = "510000-510000"
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node2"}
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"fast-local"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
+
+	vm := mock.vms[510000]
+	require.Equal(t, "node2", vm.Node)
+	require.Equal(t, 1, vm.Template)
+	require.Equal(t, "managed-by-fleeting-plugin-proxmox;managed-role-template-stage", vm.Tags)
+}
+
+func TestManagedTemplateStagingRejectsNonSharedSourceWithoutMatchingTargetStorage(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.template.DiskDef = "fast-local:vm-9000-disk-0,size=10G"
+	mock.storages = []map[string]any{
+		{
+			"type":    "storage",
+			"node":    "node1",
+			"storage": "fast-local",
+			"disk":    int64(50 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+		{
+			"type":    "storage",
+			"node":    "node2",
+			"storage": "other-local",
+			"disk":    int64(50 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+	}
+	mock.storageCfgs["fast-local"] = map[string]any{
+		"storage": "fast-local",
+		"nodes":   []string{"node1"},
+	}
+	mock.storageCfgs["other-local"] = map[string]any{
+		"storage": "other-local",
+		"nodes":   []string{"node2"},
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "required"
+	group.TemplateVMIDRange = "510000-510010"
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node2"}
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"other-local"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "node node2 has no stageable template source")
-	require.Contains(t, err.Error(), "cross-node staging requires shared template storage")
+	require.Contains(t, err.Error(), "cross-node staging requires shared template storage or matching target storage")
 }
 
 func TestSharedTemplateFallbackUsesFullCloneOnSharedTemplateStorage(t *testing.T) {

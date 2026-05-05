@@ -190,6 +190,7 @@ One practical way to split Proxmox privileges for this plugin is into three role
   - `Datastore.AllocateSpace`
   - `VM.Audit`
   - `VM.Clone`
+  - `VM.Migrate`
   - `VM.Allocate`
   - `VM.Config.CPU`
   - `VM.Config.Memory`
@@ -286,6 +287,7 @@ See [`examples/docker-autoscaler.config.toml`](/workspace/fleeting-plugin-proxmo
 - The template VM should already have Cloud-Init and QEMU guest agent enabled.
 - Use a dedicated Proxmox pool and a dedicated VMID range.
 - If `template_stage_mode` is enabled, also reserve a separate `template_vmid_range` for managed staged templates.
+- For non-shared template storage, managed staging can clone locally and then migrate the staged VM only when the target node has storage with the same storage ID.
 - Use a subnet dedicated to ephemeral runner VMs. Do not share it with manually managed VMs.
 - `network_mode = "dhcp"` skips the local IP allocator and requires the guest agent to report the acquired address.
 - For `docker-autoscaler`, the template VM must already contain a working Docker Engine configuration suitable for GitLab Runner.
