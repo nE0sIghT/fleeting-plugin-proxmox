@@ -336,13 +336,6 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 		sourceVersions[template.VMID] = descriptionValue(config.Description, sourceTemplateVersionKey)
 	}
 
-	plans := make([]ManagedTemplate, 0)
-	usedVMIDs := map[int]struct{}{}
-	for _, resource := range resources {
-		if resource.VMID > 0 {
-			usedVMIDs[resource.VMID] = struct{}{}
-		}
-	}
 	existingTemplates := make(map[string]existingManagedTemplate)
 	existingOrder := make([]existingManagedTemplate, 0)
 	for _, template := range g.findManagedTemplateResources(resources) {
@@ -370,6 +363,11 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 		existingOrder = append(existingOrder, state)
 	}
 	keepTemplates := map[string]ManagedTemplate{}
+	type stageRequest struct {
+		node   string
+		source templateChoice
+	}
+	stageRequests := make([]stageRequest, 0)
 
 	for _, node := range g.cfg.Nodes {
 		if _, ok := localTemplateByNode[node]; ok {
@@ -403,22 +401,43 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 		if existing, ok := existingTemplates[managedTemplateKey(node, sourceChoice.Resource.VMID)]; ok && shouldReuseManagedTemplate(sourceVersion, existing.Version) {
 			templates = append(templates, existing.Resource)
 			keepTemplates[existing.ID] = existing.ManagedTemplate
-			usedVMIDs[existing.VMID] = struct{}{}
 			continue
 		}
 
+		stageRequests = append(stageRequests, stageRequest{
+			node:   node,
+			source: sourceChoice,
+		})
+	}
+
+	usedVMIDs := map[int]struct{}{}
+	for _, resource := range resources {
+		if resource.VMID <= 0 {
+			continue
+		}
+		// Obsolete managed templates are deleted before new staging, so their VMIDs are reusable.
+		if g.isManagedTemplate(resource) {
+			if _, keep := keepTemplates[instanceID(resource.Node, resource.VMID)]; !keep {
+				continue
+			}
+		}
+		usedVMIDs[resource.VMID] = struct{}{}
+	}
+
+	plans := make([]ManagedTemplate, 0, len(stageRequests))
+	for _, request := range stageRequests {
 		vmid, err := g.allocateManagedTemplateVMID(usedVMIDs)
 		if err != nil {
 			return nil, err
 		}
 		usedVMIDs[vmid] = struct{}{}
 		plans = append(plans, ManagedTemplate{
-			ID:         instanceID(node, vmid),
-			Node:       node,
+			ID:         instanceID(request.node, vmid),
+			Node:       request.node,
 			VMID:       vmid,
-			Name:       fmt.Sprintf("%s-%s-%d", g.cfg.TemplateNamePrefix, node, sourceChoice.Resource.VMID),
-			SourceVMID: sourceChoice.Resource.VMID,
-			Storage:    sourceChoice.Storage,
+			Name:       fmt.Sprintf("%s-%s-%d", g.cfg.TemplateNamePrefix, request.node, request.source.Resource.VMID),
+			SourceVMID: request.source.Resource.VMID,
+			Storage:    request.source.Storage,
 		})
 	}
 

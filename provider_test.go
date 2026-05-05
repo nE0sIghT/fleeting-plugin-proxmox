@@ -21,20 +21,22 @@ import (
 )
 
 type mockVM struct {
-	Node     string
-	VMID     int
-	Name     string
-	Pool     string
-	Storage  string
-	Tags     string
-	Status   string
-	IPConfig string
-	DHCPIP   string
-	BootDisk string
-	DiskDef  string
-	MemoryMB int64
-	CPUCores int
-	DiskMB   int64
+	Node        string
+	VMID        int
+	Name        string
+	Pool        string
+	Storage     string
+	Tags        string
+	Description string
+	Status      string
+	Template    int
+	IPConfig    string
+	DHCPIP      string
+	BootDisk    string
+	DiskDef     string
+	MemoryMB    int64
+	CPUCores    int
+	DiskMB      int64
 }
 
 type mockProxmox struct {
@@ -157,16 +159,17 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 			out = append(out, m.storages...)
 			for _, vm := range m.vms {
 				out = append(out, map[string]any{
-					"type":    "qemu",
-					"node":    vm.Node,
-					"vmid":    vm.VMID,
-					"name":    vm.Name,
-					"pool":    vm.Pool,
-					"tags":    vm.Tags,
-					"status":  vm.Status,
-					"maxmem":  vm.MemoryMB * 1024 * 1024,
-					"maxdisk": vm.DiskMB * 1024 * 1024,
-					"maxcpu":  vm.CPUCores,
+					"type":     "qemu",
+					"node":     vm.Node,
+					"vmid":     vm.VMID,
+					"name":     vm.Name,
+					"pool":     vm.Pool,
+					"tags":     vm.Tags,
+					"template": vm.Template,
+					"status":   vm.Status,
+					"maxmem":   vm.MemoryMB * 1024 * 1024,
+					"maxdisk":  vm.DiskMB * 1024 * 1024,
+					"maxcpu":   vm.CPUCores,
 				})
 			}
 			write(out)
@@ -235,6 +238,7 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 				vm.Pool = value
 			}
 			vm.Tags = r.PostForm.Get("tags")
+			vm.Description = r.PostForm.Get("description")
 			vm.IPConfig = r.PostForm.Get("ipconfig0")
 			if value := r.PostForm.Get("memory"); value != "" {
 				parsed, parseErr := strconv.ParseInt(value, 10, 64)
@@ -280,6 +284,15 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 			m.taskNode["UPID:stop"] = "node1"
 			write("UPID:stop")
 			return
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/template"):
+			vmid := extractVMID(r.URL.Path)
+			vm := m.vms[vmid]
+			vm.Template = 1
+			vm.Status = "stopped"
+			m.vms[vmid] = vm
+			m.taskNode["UPID:template"] = "node1"
+			write("UPID:template")
+			return
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/"):
 			vmid := extractVMID(r.URL.Path)
 			delete(m.vms, vmid)
@@ -293,23 +306,27 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 			vmid := extractVMID(r.URL.Path)
 			if vmid == m.template.VMID {
 				write(map[string]any{
-					"name":      m.template.Name,
-					"pool":      m.template.Pool,
-					"tags":      m.template.Tags,
-					"bootdisk":  m.template.BootDisk,
-					"scsi0":     m.template.DiskDef,
-					"ipconfig0": m.template.IPConfig,
+					"name":        m.template.Name,
+					"pool":        m.template.Pool,
+					"tags":        m.template.Tags,
+					"description": m.template.Description,
+					"bootdisk":    m.template.BootDisk,
+					"scsi0":       m.template.DiskDef,
+					"ipconfig0":   m.template.IPConfig,
+					"template":    1,
 				})
 				return
 			}
 			vm := m.vms[vmid]
 			write(map[string]any{
-				"name":      vm.Name,
-				"pool":      vm.Pool,
-				"tags":      vm.Tags,
-				"ipconfig0": vm.IPConfig,
-				"bootdisk":  vm.BootDisk,
-				"scsi0":     vm.DiskDef,
+				"name":        vm.Name,
+				"pool":        vm.Pool,
+				"tags":        vm.Tags,
+				"description": vm.Description,
+				"ipconfig0":   vm.IPConfig,
+				"bootdisk":    vm.BootDisk,
+				"scsi0":       vm.DiskDef,
+				"template":    vm.Template,
 			})
 			return
 		case strings.HasPrefix(r.URL.Path, "/api2/json/nodes/") && strings.Contains(r.URL.Path, "/qemu/") && strings.HasSuffix(r.URL.Path, "/status/current"):
@@ -834,6 +851,81 @@ func TestLinkedCloneModeFailsInitWithoutLocalTemplate(t *testing.T) {
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "clone_mode=linked requires a local template")
+}
+
+func TestManagedTemplateReplacementReusesObsoleteVMID(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.template.Description = "template-version=2"
+	mock.storages = []map[string]any{
+		{
+			"type":       "storage",
+			"node":       "node1",
+			"storage":    "ceph-vm",
+			"plugintype": "rbd",
+			"disk":       int64(100 * 1024 * 1024 * 1024),
+			"maxdisk":    int64(500 * 1024 * 1024 * 1024),
+			"shared":     1,
+		},
+		{
+			"type":       "storage",
+			"node":       "node2",
+			"storage":    "ceph-vm",
+			"plugintype": "rbd",
+			"disk":       int64(100 * 1024 * 1024 * 1024),
+			"maxdisk":    int64(500 * 1024 * 1024 * 1024),
+			"shared":     1,
+		},
+	}
+	mock.vms[510000] = mockVM{
+		Node:        "node2",
+		VMID:        510000,
+		Name:        "runner-template-node2-9000",
+		Pool:        "ci",
+		Storage:     "ceph-vm",
+		Tags:        "managed-by-fleeting-plugin-proxmox;managed-role-template-stage",
+		Description: "source-template-version=1",
+		Status:      "stopped",
+		Template:    1,
+		BootDisk:    mock.template.BootDisk,
+		DiskDef:     "ceph-vm:vm-510000-disk-0,size=10G",
+		MemoryMB:    mock.template.MemoryMB,
+		CPUCores:    mock.template.CPUCores,
+		DiskMB:      mock.template.DiskMB,
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "required"
+	group.TemplateVMIDRange = "510000-510000"
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node2"}
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"ceph-vm"}
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
+
+	mock.mu.Lock()
+	replacement := mock.vms[510000]
+	mock.mu.Unlock()
+	require.Equal(t, "runner-template-node2-9000", replacement.Name)
+	require.Equal(t, 1, replacement.Template)
+	require.Equal(t, "Managed staged template for node node2 from source template 9000\nsource-template-version=2", replacement.Description)
 }
 
 func TestAutoCloneModeFallsBackToFullForUnsupportedStoragePluginType(t *testing.T) {
