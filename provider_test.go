@@ -712,17 +712,28 @@ func TestInitFailsWhenNodeHasNoLocalTemplateAndNoSharedTargetStorage(t *testing.
 	t.Parallel()
 
 	mock := newMockProxmox()
-	mock.storages = append(mock.storages, map[string]any{
-		"type":    "storage",
-		"node":    "node2",
-		"storage": "fast-local",
-		"disk":    int64(50 * 1024 * 1024 * 1024),
-		"maxdisk": int64(500 * 1024 * 1024 * 1024),
-		"shared":  0,
-	})
+	mock.template.DiskDef = "fast-local:vm-9000-disk-0,size=10G"
+	mock.storages = []map[string]any{
+		{
+			"type":    "storage",
+			"node":    "node1",
+			"storage": "fast-local",
+			"disk":    int64(50 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+		{
+			"type":    "storage",
+			"node":    "node2",
+			"storage": "fast-local",
+			"disk":    int64(50 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+	}
 	mock.storageCfgs["fast-local"] = map[string]any{
 		"storage": "fast-local",
-		"nodes":   []string{"node2"},
+		"nodes":   []string{"node1", "node2"},
 	}
 
 	server := httptest.NewServer(mock.handler(t))
@@ -747,6 +758,60 @@ func TestInitFailsWhenNodeHasNoLocalTemplateAndNoSharedTargetStorage(t *testing.
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "node node2 has no usable template")
+}
+
+func TestManagedTemplateStagingRejectsNonSharedCrossNodeSource(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.template.DiskDef = "fast-local:vm-9000-disk-0,size=10G"
+	mock.storages = []map[string]any{
+		{
+			"type":    "storage",
+			"node":    "node1",
+			"storage": "fast-local",
+			"disk":    int64(50 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+		{
+			"type":    "storage",
+			"node":    "node2",
+			"storage": "fast-local",
+			"disk":    int64(50 * 1024 * 1024 * 1024),
+			"maxdisk": int64(500 * 1024 * 1024 * 1024),
+			"shared":  0,
+		},
+	}
+	mock.storageCfgs["fast-local"] = map[string]any{
+		"storage": "fast-local",
+		"nodes":   []string{"node1", "node2"},
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "required"
+	group.TemplateVMIDRange = "510000-510010"
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node2"}
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"fast-local"}
+	group.StateFile = filepath.Join(t.TempDir(), "state.json")
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "node node2 has no stageable template source")
+	require.Contains(t, err.Error(), "cross-node staging requires shared template storage")
 }
 
 func TestSharedTemplateFallbackUsesFullCloneOnSharedTemplateStorage(t *testing.T) {
