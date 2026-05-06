@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -79,25 +80,57 @@ type NodeStatus struct {
 }
 
 type VMConfig struct {
-	Name         string `json:"name"`
-	Pool         string `json:"pool"`
-	Tags         string `json:"tags"`
-	Description  string `json:"description"`
-	IPConfig0    string `json:"ipconfig0"`
-	BootDisk     string `json:"bootdisk"`
-	SCSI0        string `json:"scsi0"`
-	VirtIO0      string `json:"virtio0"`
-	SATA0        string `json:"sata0"`
-	IDE0         string `json:"ide0"`
-	SSHKeys      string `json:"sshkeys"`
-	CIUser       string `json:"ciuser"`
-	NameServer   string `json:"nameserver"`
-	SearchDomain string `json:"searchdomain"`
-	Agent        string `json:"agent"`
-	Template     int    `json:"template"`
+	Name         string            `json:"name"`
+	Pool         string            `json:"pool"`
+	Tags         string            `json:"tags"`
+	Description  string            `json:"description"`
+	IPConfig0    string            `json:"ipconfig0"`
+	BootDisk     string            `json:"bootdisk"`
+	SCSI0        string            `json:"scsi0"`
+	VirtIO0      string            `json:"virtio0"`
+	SATA0        string            `json:"sata0"`
+	IDE0         string            `json:"ide0"`
+	DiskDevices  map[string]string `json:"-"`
+	SSHKeys      string            `json:"sshkeys"`
+	CIUser       string            `json:"ciuser"`
+	NameServer   string            `json:"nameserver"`
+	SearchDomain string            `json:"searchdomain"`
+	Agent        string            `json:"agent"`
+	Template     int               `json:"template"`
+}
+
+func (c *VMConfig) UnmarshalJSON(data []byte) error {
+	type rawVMConfig VMConfig
+	var raw rawVMConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = VMConfig(raw)
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	c.DiskDevices = make(map[string]string)
+	for name, value := range fields {
+		if !isQEMUDiskDevice(name) {
+			continue
+		}
+		var disk string
+		if err := json.Unmarshal(value, &disk); err != nil {
+			return fmt.Errorf("decode disk device %s: %w", name, err)
+		}
+		if disk != "" {
+			c.DiskDevices[name] = disk
+		}
+	}
+	return nil
 }
 
 func (c VMConfig) DiskValue(device string) string {
+	if value := c.DiskDevices[device]; value != "" {
+		return value
+	}
 	switch device {
 	case "scsi0":
 		return c.SCSI0
@@ -109,6 +142,77 @@ func (c VMConfig) DiskValue(device string) string {
 		return c.IDE0
 	default:
 		return ""
+	}
+}
+
+func (c VMConfig) DiskDeviceNames() []string {
+	names := make([]string, 0, len(c.DiskDevices)+4)
+	seen := map[string]struct{}{}
+	add := func(name, value string) {
+		if value == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+
+	for name, value := range c.DiskDevices {
+		add(name, value)
+	}
+	add("scsi0", c.SCSI0)
+	add("virtio0", c.VirtIO0)
+	add("sata0", c.SATA0)
+	add("ide0", c.IDE0)
+
+	sort.Slice(names, func(i, j int) bool {
+		leftBus, leftIndex, _ := splitQEMUDiskDevice(names[i])
+		rightBus, rightIndex, _ := splitQEMUDiskDevice(names[j])
+		if leftBus != rightBus {
+			return diskBusOrder(leftBus) < diskBusOrder(rightBus)
+		}
+		if leftIndex != rightIndex {
+			return leftIndex < rightIndex
+		}
+		return names[i] < names[j]
+	})
+
+	return names
+}
+
+func isQEMUDiskDevice(device string) bool {
+	_, _, ok := splitQEMUDiskDevice(device)
+	return ok
+}
+
+func splitQEMUDiskDevice(device string) (string, int, bool) {
+	for _, bus := range []string{"scsi", "virtio", "sata", "ide"} {
+		if !strings.HasPrefix(device, bus) {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(device, bus))
+		if err != nil {
+			return "", 0, false
+		}
+		return bus, index, true
+	}
+	return "", 0, false
+}
+
+func diskBusOrder(bus string) int {
+	switch bus {
+	case "scsi":
+		return 0
+	case "virtio":
+		return 1
+	case "sata":
+		return 2
+	case "ide":
+		return 3
+	default:
+		return 4
 	}
 }
 

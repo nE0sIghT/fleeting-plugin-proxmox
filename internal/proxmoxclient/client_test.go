@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"math/big"
@@ -86,6 +87,20 @@ func TestDecodeResponseIncludesProxmoxStatusMessage(t *testing.T) {
 	require.ErrorContains(t, err, "status=500")
 	require.ErrorContains(t, err, `status_message="storage 'ceph-vm' does not support linked clones"`)
 	require.ErrorContains(t, err, `body={"data":null}`)
+}
+
+func TestVMConfigCapturesNumberedDiskDevices(t *testing.T) {
+	var config VMConfig
+	err := json.Unmarshal([]byte(`{
+		"bootdisk": "scsi0",
+		"scsi0": "nvme2:vm-21001-cloudinit,media=cdrom",
+		"scsi1": "nvme2:vm-21001-disk-0,size=64G",
+		"virtio0": "nvme2:vm-21001-disk-1,size=32G"
+	}`), &config)
+	require.NoError(t, err)
+
+	require.Equal(t, "nvme2:vm-21001-disk-0,size=64G", config.DiskValue("scsi1"))
+	require.Equal(t, []string{"scsi0", "scsi1", "virtio0"}, config.DiskDeviceNames())
 }
 
 func newTestTLSServer(t *testing.T, cert tls.Certificate) *httptest.Server {

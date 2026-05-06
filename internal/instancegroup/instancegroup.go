@@ -2018,20 +2018,38 @@ func (g *Group) requiredCPUCores() float64 {
 
 func (g *Group) resolveDiskDevice(config proxmoxclient.VMConfig) (string, error) {
 	if g.cfg.VMDiskDevice != "" {
-		if config.DiskValue(g.cfg.VMDiskDevice) == "" {
+		value := config.DiskValue(g.cfg.VMDiskDevice)
+		if value == "" {
 			return "", fmt.Errorf("vm_disk_device %q not present in template config", g.cfg.VMDiskDevice)
+		}
+		if !isResizableDiskValue(value) {
+			return "", fmt.Errorf("vm_disk_device %q is not a resizable disk device: %s", g.cfg.VMDiskDevice, value)
 		}
 		return g.cfg.VMDiskDevice, nil
 	}
-	if config.BootDisk != "" && config.DiskValue(config.BootDisk) != "" {
+	if config.BootDisk != "" && isResizableDiskValue(config.DiskValue(config.BootDisk)) {
 		return config.BootDisk, nil
 	}
-	for _, device := range []string{"scsi0", "virtio0", "sata0", "ide0"} {
-		if config.DiskValue(device) != "" {
+	for _, device := range config.DiskDeviceNames() {
+		if isResizableDiskValue(config.DiskValue(device)) {
 			return device, nil
 		}
 	}
 	return "", fmt.Errorf("unable to determine template disk device; set vm_disk_device explicitly")
+}
+
+func isResizableDiskValue(value string) bool {
+	value = strings.ToLower(value)
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	if strings.Contains(value, "media=cdrom") {
+		return false
+	}
+	if strings.Contains(value, "cloudinit") {
+		return false
+	}
+	return true
 }
 
 func diskSizeMB(value string) (int64, bool) {

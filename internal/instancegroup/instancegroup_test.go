@@ -177,6 +177,34 @@ func TestShouldReuseManagedTemplate(t *testing.T) {
 	require.False(t, shouldReuseManagedTemplate("2", ""))
 }
 
+func TestResolveDiskDeviceSkipsCloudInitCDROM(t *testing.T) {
+	t.Parallel()
+
+	group := &Group{}
+	config := proxmoxclient.VMConfig{
+		BootDisk: "scsi0",
+		SCSI0:    "nvme2:vm-21001-cloudinit,media=cdrom",
+		DiskDevices: map[string]string{
+			"scsi0": "nvme2:vm-21001-cloudinit,media=cdrom",
+			"scsi1": "nvme2:vm-21001-disk-0,size=64G",
+		},
+	}
+
+	disk, err := group.resolveDiskDevice(config)
+	require.NoError(t, err)
+	require.Equal(t, "scsi1", disk)
+}
+
+func TestResolveDiskDeviceRejectsExplicitCDROM(t *testing.T) {
+	t.Parallel()
+
+	group := &Group{cfg: Config{VMDiskDevice: "scsi0"}}
+	_, err := group.resolveDiskDevice(proxmoxclient.VMConfig{
+		SCSI0: "nvme2:vm-21001-cloudinit,media=cdrom",
+	})
+	require.ErrorContains(t, err, `vm_disk_device "scsi0" is not a resizable disk device`)
+}
+
 func TestIncreaseIgnoresNonPositiveDelta(t *testing.T) {
 	t.Parallel()
 
