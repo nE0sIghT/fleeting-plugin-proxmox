@@ -133,6 +133,7 @@ func TestApplyAllocatedResourcesCountsRunningVMs(t *testing.T) {
 	resources := []proxmoxclient.ClusterResource{
 		{Type: "qemu", Node: "node1", VMID: 5001, Status: "running", MaxMem: 4 * 1024 * 1024 * 1024, MaxCPU: 2},
 		{Type: "qemu", Node: "node1", VMID: 5002, Status: "stopped", MaxMem: 8 * 1024 * 1024 * 1024, MaxCPU: 4},
+		{Type: "qemu", Node: "node1", VMID: 5004, Status: "stopped", Tags: "managed-by-fleeting-plugin-proxmox", MaxMem: 32 * 1024 * 1024 * 1024, MaxCPU: 16},
 		{Type: "qemu", Node: "node1", VMID: 5003, Status: "running", MaxMem: 16 * 1024 * 1024 * 1024, MaxCPU: 8},
 		{Type: "qemu", Node: "node1", VMID: 2001, Template: 1, Status: "running", MaxMem: 8 * 1024 * 1024 * 1024, MaxCPU: 4},
 		{Type: "lxc", Node: "node1", VMID: 6001, Status: "running", MaxMem: 8 * 1024 * 1024 * 1024, MaxCPU: 4},
@@ -141,10 +142,38 @@ func TestApplyAllocatedResourcesCountsRunningVMs(t *testing.T) {
 
 	group.applyAllocatedResources(states, resources)
 
-	require.Equal(t, 4096.0, states[0].AllocatedMemoryMB)
-	require.Equal(t, 2.0, states[0].AllocatedCPUCores)
+	require.Equal(t, 36864.0, states[0].AllocatedMemoryMB)
+	require.Equal(t, 18.0, states[0].AllocatedCPUCores)
 	require.Zero(t, states[1].AllocatedMemoryMB)
 	require.Zero(t, states[1].AllocatedCPUCores)
+}
+
+func TestShouldCountAllocatedResource(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, shouldCountAllocatedResource(proxmoxclient.ClusterResource{
+		Type:   "qemu",
+		Status: "running",
+	}))
+	require.True(t, shouldCountAllocatedResource(proxmoxclient.ClusterResource{
+		Type:   "qemu",
+		Status: "stopped",
+		Tags:   "managed-by-fleeting-plugin-proxmox",
+	}))
+	require.False(t, shouldCountAllocatedResource(proxmoxclient.ClusterResource{
+		Type:   "qemu",
+		Status: "stopped",
+	}))
+	require.False(t, shouldCountAllocatedResource(proxmoxclient.ClusterResource{
+		Type:     "qemu",
+		Template: 1,
+		Status:   "stopped",
+		Tags:     "managed-by-fleeting-plugin-proxmox",
+	}))
+	require.False(t, shouldCountAllocatedResource(proxmoxclient.ClusterResource{
+		Type:   "lxc",
+		Status: "running",
+	}))
 }
 
 func TestIsManagedTemplate(t *testing.T) {

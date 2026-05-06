@@ -109,6 +109,8 @@ var linkedClonePluginTypes = map[string]struct{}{
 	"nexenta":  {},
 }
 
+const managedByTag = "managed-by-fleeting-plugin-proxmox"
+
 type provisionPlan struct {
 	TemplateNode    string
 	TemplateVMID    int
@@ -1780,7 +1782,7 @@ func (g *Group) applyAllocatedResources(states []nodePlanState, resources []prox
 	}
 
 	for _, resource := range resources {
-		if resource.Type != "qemu" || resource.Template == 1 || resource.Status != "running" {
+		if !shouldCountAllocatedResource(resource) {
 			continue
 		}
 		if _, pending := g.pendingVMIDs[resource.VMID]; pending {
@@ -1793,6 +1795,17 @@ func (g *Group) applyAllocatedResources(states []nodePlanState, resources []prox
 		state.AllocatedMemoryMB += float64(resource.MaxMem) / 1024.0 / 1024.0
 		state.AllocatedCPUCores += resource.MaxCPU
 	}
+}
+
+func shouldCountAllocatedResource(resource proxmoxclient.ClusterResource) bool {
+	if resource.Type != "qemu" || resource.Template == 1 {
+		return false
+	}
+	if resource.Status == "running" {
+		return true
+	}
+	_, ok := parseTags(resource.Tags)[managedByTag]
+	return ok
 }
 
 func (g *Group) applyPendingReservations(states []nodePlanState) {

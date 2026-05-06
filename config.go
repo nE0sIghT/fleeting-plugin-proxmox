@@ -27,6 +27,7 @@ const (
 	defaultMetricsInterval   = 15 * time.Second
 	defaultStateDir          = "/var/lib/fleeting-plugin-proxmox"
 	defaultStateFileBasename = "state.json"
+	managedByTag             = "managed-by-fleeting-plugin-proxmox"
 )
 
 type vmidRange struct {
@@ -391,11 +392,11 @@ func (c *pluginConfig) applyEnv() {
 
 func (c *pluginConfig) mandatoryTags() []string {
 	tagGroup := sanitizeTag("fleeting-group-" + c.NamePrefix)
-	return append([]string{"managed-by-fleeting-plugin-proxmox", tagGroup}, c.Tags...)
+	return append([]string{managedByTag, tagGroup}, c.Tags...)
 }
 
 func (c *pluginConfig) managedTemplateTags() []string {
-	return []string{"managed-by-fleeting-plugin-proxmox", "managed-role-template-stage"}
+	return []string{managedByTag, "managed-role-template-stage"}
 }
 
 func (c *pluginConfig) flattenRanges() []string {
