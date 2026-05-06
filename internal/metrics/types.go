@@ -20,22 +20,27 @@ type Snapshot struct {
 }
 
 type NodeSnapshot struct {
-	Node                       string  `json:"node"`
-	TotalCPUCores              float64 `json:"total_cpu_cores"`
-	RuntimeFreeCPUCores        float64 `json:"runtime_free_cpu_cores"`
-	AllocatedCPUCores          float64 `json:"allocated_cpu_cores"`
-	CPUAllocationLimitCores    float64 `json:"cpu_allocation_limit_cores"`
-	TotalMemoryBytes           float64 `json:"total_memory_bytes"`
-	RuntimeFreeMemoryBytes     float64 `json:"runtime_free_memory_bytes"`
-	AllocatedMemoryBytes       float64 `json:"allocated_memory_bytes"`
-	MemoryAllocationLimitBytes float64 `json:"memory_allocation_limit_bytes"`
+	Node                              string  `json:"node"`
+	TotalCPUCores                     float64 `json:"total_cpu_cores"`
+	RuntimeFreeCPUCores               float64 `json:"runtime_free_cpu_cores"`
+	ReservedCPUCores                  float64 `json:"reserved_cpu_cores"`
+	AllocatedCPUCores                 float64 `json:"allocated_cpu_cores"`
+	CPUAllocationLimitCores           float64 `json:"cpu_allocation_limit_cores"`
+	PhysicalAllocationFreeCPUCores    float64 `json:"physical_allocation_free_cpu_cores"`
+	TotalMemoryBytes                  float64 `json:"total_memory_bytes"`
+	RuntimeFreeMemoryBytes            float64 `json:"runtime_free_memory_bytes"`
+	ReservedMemoryBytes               float64 `json:"reserved_memory_bytes"`
+	AllocatedMemoryBytes              float64 `json:"allocated_memory_bytes"`
+	MemoryAllocationLimitBytes        float64 `json:"memory_allocation_limit_bytes"`
+	PhysicalAllocationFreeMemoryBytes float64 `json:"physical_allocation_free_memory_bytes"`
 }
 
 type StorageSnapshot struct {
-	Node       string  `json:"node"`
-	Storage    string  `json:"storage"`
-	TotalBytes float64 `json:"total_bytes"`
-	FreeBytes  float64 `json:"free_bytes"`
+	Node          string  `json:"node"`
+	Storage       string  `json:"storage"`
+	TotalBytes    float64 `json:"total_bytes"`
+	FreeBytes     float64 `json:"free_bytes"`
+	ReservedBytes float64 `json:"reserved_bytes"`
 }
 
 func (i Identity) Key() string {

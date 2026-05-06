@@ -125,6 +125,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 			Scheduler:                    scheduler.New(g.Scheduler),
 			MemoryAllocationLimitPercent: g.NodeMemoryAllocationLimitPercent,
 			CPUAllocationLimitPercent:    g.NodeCPUAllocationLimitPercent,
+			NodePolicies:                 g.resolveNodePolicies(),
 			Reserve: scheduler.Reserve{
 				MemoryMB:      g.NodeReserveMemoryMB,
 				MemoryPercent: g.NodeReserveMemoryPercent,

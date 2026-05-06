@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
+	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/scheduler"
 )
 
 const (
@@ -59,15 +60,16 @@ type pluginConfig struct {
 	VMDiskMB       int64         `json:"vm_disk_mb"`
 	VMDiskDevice   string        `json:"vm_disk_device"`
 
-	NodeReserveMemoryMB              int64  `json:"node_reserve_memory_mb"`
-	NodeReserveMemoryPercent         int    `json:"node_reserve_memory_percent"`
-	NodeReserveCPUCores              int    `json:"node_reserve_cpu_cores"`
-	NodeReserveCPUPercent            int    `json:"node_reserve_cpu_percent"`
-	NodeReserveDiskGB                int64  `json:"node_reserve_disk_gb"`
-	NodeReserveDiskPercent           int    `json:"node_reserve_disk_percent"`
-	NodeMemoryAllocationLimitPercent int    `json:"node_memory_allocation_limit_percent"`
-	NodeCPUAllocationLimitPercent    int    `json:"node_cpu_allocation_limit_percent"`
-	Scheduler                        string `json:"scheduler"`
+	NodeReserveMemoryMB              int64              `json:"node_reserve_memory_mb"`
+	NodeReserveMemoryPercent         int                `json:"node_reserve_memory_percent"`
+	NodeReserveCPUCores              int                `json:"node_reserve_cpu_cores"`
+	NodeReserveCPUPercent            int                `json:"node_reserve_cpu_percent"`
+	NodeReserveDiskGB                int64              `json:"node_reserve_disk_gb"`
+	NodeReserveDiskPercent           int                `json:"node_reserve_disk_percent"`
+	NodeMemoryAllocationLimitPercent int                `json:"node_memory_allocation_limit_percent"`
+	NodeCPUAllocationLimitPercent    int                `json:"node_cpu_allocation_limit_percent"`
+	NodePolicies                     []nodePolicyConfig `json:"node_policies"`
+	Scheduler                        string             `json:"scheduler"`
 
 	MaxParallelClones  int `json:"max_parallel_clones"`
 	MaxParallelStarts  int `json:"max_parallel_starts"`
@@ -112,6 +114,20 @@ type pluginConfig struct {
 	parsedPoolPrefix        netip.Prefix
 	parsedGateway           netip.Addr
 	agentRequiredSet        bool
+}
+
+type nodePolicyConfig struct {
+	Nodes LaxStringList `json:"nodes"`
+
+	ReserveMemoryMB      *int64 `json:"reserve_memory_mb"`
+	ReserveMemoryPercent *int   `json:"reserve_memory_percent"`
+	ReserveCPUCores      *int   `json:"reserve_cpu_cores"`
+	ReserveCPUPercent    *int   `json:"reserve_cpu_percent"`
+	ReserveDiskGB        *int64 `json:"reserve_disk_gb"`
+	ReserveDiskPercent   *int   `json:"reserve_disk_percent"`
+
+	MemoryAllocationLimitPercent *int `json:"memory_allocation_limit_percent"`
+	CPUAllocationLimitPercent    *int `json:"cpu_allocation_limit_percent"`
 }
 
 func (g *InstanceGroup) config() *pluginConfig {
@@ -289,9 +305,14 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	if len(c.TargetStorages) == 0 && (c.NodeReserveDiskGB > 0 || c.NodeReserveDiskPercent > 0) {
 		errs = append(errs, fmt.Errorf("node_reserve_disk requires target_storages"))
 	}
+	if len(c.TargetStorages) == 0 && c.hasPerNodeDiskReserve() {
+		errs = append(errs, fmt.Errorf("node_policies reserve_disk requires target_storages"))
+	}
 	if c.PreferIPv6 {
 		errs = append(errs, fmt.Errorf("prefer_ipv6 is unsupported in v1"))
 	}
+
+	c.validateNodePolicies(&errs)
 
 	c.parsedVMIDRange = parseVMIDRange(c.VMIDRange, &errs)
 	if c.TemplateVMIDRange != "" {
@@ -378,6 +399,141 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+func (c *pluginConfig) defaultNodePolicy() scheduler.NodePolicy {
+	return scheduler.NodePolicy{
+		Reserve: scheduler.Reserve{
+			MemoryMB:      c.NodeReserveMemoryMB,
+			MemoryPercent: c.NodeReserveMemoryPercent,
+			DiskGB:        c.NodeReserveDiskGB,
+			DiskPercent:   c.NodeReserveDiskPercent,
+			CPUCores:      c.NodeReserveCPUCores,
+			CPUPercent:    c.NodeReserveCPUPercent,
+		},
+		MemoryAllocationLimitPercent: c.NodeMemoryAllocationLimitPercent,
+		CPUAllocationLimitPercent:    c.NodeCPUAllocationLimitPercent,
+	}
+}
+
+func (c *pluginConfig) resolveNodePolicies() map[string]scheduler.NodePolicy {
+	policies := make(map[string]scheduler.NodePolicy, len(c.Nodes))
+	defaultPolicy := c.defaultNodePolicy()
+	for _, node := range c.Nodes {
+		policies[node] = defaultPolicy
+	}
+	for _, override := range c.NodePolicies {
+		for _, node := range override.Nodes {
+			policy, ok := policies[node]
+			if !ok {
+				continue
+			}
+			applyNodePolicyOverride(&policy, override)
+			policies[node] = policy
+		}
+	}
+	return policies
+}
+
+func applyNodePolicyOverride(policy *scheduler.NodePolicy, override nodePolicyConfig) {
+	if override.ReserveMemoryMB != nil {
+		policy.Reserve.MemoryMB = *override.ReserveMemoryMB
+	}
+	if override.ReserveMemoryPercent != nil {
+		policy.Reserve.MemoryPercent = *override.ReserveMemoryPercent
+	}
+	if override.ReserveCPUCores != nil {
+		policy.Reserve.CPUCores = *override.ReserveCPUCores
+	}
+	if override.ReserveCPUPercent != nil {
+		policy.Reserve.CPUPercent = *override.ReserveCPUPercent
+	}
+	if override.ReserveDiskGB != nil {
+		policy.Reserve.DiskGB = *override.ReserveDiskGB
+	}
+	if override.ReserveDiskPercent != nil {
+		policy.Reserve.DiskPercent = *override.ReserveDiskPercent
+	}
+	if override.MemoryAllocationLimitPercent != nil {
+		policy.MemoryAllocationLimitPercent = *override.MemoryAllocationLimitPercent
+	}
+	if override.CPUAllocationLimitPercent != nil {
+		policy.CPUAllocationLimitPercent = *override.CPUAllocationLimitPercent
+	}
+}
+
+func (c *pluginConfig) validateNodePolicies(errs *[]error) {
+	knownNodes := make(map[string]struct{}, len(c.Nodes))
+	for _, node := range c.Nodes {
+		knownNodes[node] = struct{}{}
+	}
+
+	assigned := map[string]struct{}{}
+	for i, policy := range c.NodePolicies {
+		prefix := fmt.Sprintf("node_policies[%d]", i)
+		if len(policy.Nodes) == 0 {
+			*errs = append(*errs, fmt.Errorf("%s.nodes must not be empty", prefix))
+		}
+		for _, node := range policy.Nodes {
+			if _, ok := knownNodes[node]; !ok {
+				*errs = append(*errs, fmt.Errorf("%s.nodes contains unknown node %q", prefix, node))
+				continue
+			}
+			if _, exists := assigned[node]; exists {
+				*errs = append(*errs, fmt.Errorf("node %q is listed by more than one node_policies entry", node))
+				continue
+			}
+			assigned[node] = struct{}{}
+		}
+
+		validateOptionalInt64(prefix+".reserve_memory_mb", policy.ReserveMemoryMB, 0, errs)
+		validateOptionalInt64(prefix+".reserve_disk_gb", policy.ReserveDiskGB, 0, errs)
+		validateOptionalInt(prefix+".reserve_cpu_cores", policy.ReserveCPUCores, 0, errs)
+		validateOptionalPercent(prefix+".reserve_memory_percent", policy.ReserveMemoryPercent, errs)
+		validateOptionalPercent(prefix+".reserve_cpu_percent", policy.ReserveCPUPercent, errs)
+		validateOptionalPercent(prefix+".reserve_disk_percent", policy.ReserveDiskPercent, errs)
+		validateOptionalInt(prefix+".memory_allocation_limit_percent", policy.MemoryAllocationLimitPercent, 0, errs)
+		validateOptionalInt(prefix+".cpu_allocation_limit_percent", policy.CPUAllocationLimitPercent, 0, errs)
+	}
+}
+
+func validateOptionalInt(name string, value *int, min int, errs *[]error) {
+	if value == nil {
+		return
+	}
+	if *value < min {
+		*errs = append(*errs, fmt.Errorf("%s must be >= %d", name, min))
+	}
+}
+
+func validateOptionalInt64(name string, value *int64, min int64, errs *[]error) {
+	if value == nil {
+		return
+	}
+	if *value < min {
+		*errs = append(*errs, fmt.Errorf("%s must be >= %d", name, min))
+	}
+}
+
+func validateOptionalPercent(name string, value *int, errs *[]error) {
+	if value == nil {
+		return
+	}
+	if *value < 0 || *value > 100 {
+		*errs = append(*errs, fmt.Errorf("%s must be between 0 and 100", name))
+	}
+}
+
+func (c *pluginConfig) hasPerNodeDiskReserve() bool {
+	for _, policy := range c.NodePolicies {
+		if policy.ReserveDiskGB != nil && *policy.ReserveDiskGB > 0 {
+			return true
+		}
+		if policy.ReserveDiskPercent != nil && *policy.ReserveDiskPercent > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *pluginConfig) applyEnv() {

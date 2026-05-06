@@ -45,6 +45,12 @@ check_interval = 3
     node_reserve_disk_percent = 10
     node_memory_allocation_limit_percent = 100
     node_cpu_allocation_limit_percent = 100
+    # Optional per-node overrides. Unset fields inherit the global values above.
+    # [[runners.autoscaler.plugin_config.node_policies]]
+    #   nodes = ["pve01"]
+    #   reserve_memory_mb = 32768
+    #   reserve_memory_percent = 0
+    #   cpu_allocation_limit_percent = 200
     metrics_socket = "/run/fleeting-plugin-proxmox/metrics.sock"
     metrics_interval = "15s"
 

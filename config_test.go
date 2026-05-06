@@ -220,6 +220,99 @@ func TestDiskReserveRequiresTargetStorages(t *testing.T) {
 	require.ErrorContains(t, err, "node_reserve_disk requires target_storages")
 }
 
+func TestNodePoliciesResolveOverridesAndExplicitZero(t *testing.T) {
+	t.Parallel()
+
+	cfg := validStaticConfig(t)
+	cfg.Nodes = []string{"pve1", "pve2", "pve3"}
+	cfg.TargetStorages = []string{"nvme0"}
+	cfg.NodeReserveMemoryPercent = 10
+	cfg.NodeReserveCPUPercent = 10
+	cfg.NodeReserveDiskPercent = 10
+	cfg.NodeMemoryAllocationLimitPercent = 100
+	cfg.NodeCPUAllocationLimitPercent = 100
+	cfg.NodePolicies = []nodePolicyConfig{
+		{
+			Nodes:                     []string{"pve1", "pve2"},
+			ReserveMemoryMB:           int64Ptr(32768),
+			ReserveMemoryPercent:      intPtr(0),
+			ReserveDiskPercent:        intPtr(0),
+			CPUAllocationLimitPercent: intPtr(200),
+		},
+	}
+
+	require.NoError(t, cfg.validate(provider.Settings{}))
+
+	policies := cfg.resolveNodePolicies()
+	require.Equal(t, int64(32768), policies["pve1"].Reserve.MemoryMB)
+	require.Zero(t, policies["pve1"].Reserve.MemoryPercent)
+	require.Zero(t, policies["pve1"].Reserve.DiskPercent)
+	require.Equal(t, 100, policies["pve1"].MemoryAllocationLimitPercent)
+	require.Equal(t, 200, policies["pve1"].CPUAllocationLimitPercent)
+	require.Equal(t, 10, policies["pve3"].Reserve.MemoryPercent)
+	require.Equal(t, 10, policies["pve3"].Reserve.CPUPercent)
+	require.Equal(t, 10, policies["pve3"].Reserve.DiskPercent)
+	require.Equal(t, 100, policies["pve3"].CPUAllocationLimitPercent)
+}
+
+func TestNodePoliciesValidateNodes(t *testing.T) {
+	t.Parallel()
+
+	cfg := validStaticConfig(t)
+	cfg.Nodes = []string{"pve1", "pve2"}
+	cfg.NodePolicies = []nodePolicyConfig{
+		{Nodes: []string{"pve1", "missing"}},
+		{Nodes: []string{"pve1"}},
+		{},
+	}
+
+	err := cfg.validate(provider.Settings{})
+	require.ErrorContains(t, err, `node_policies[0].nodes contains unknown node "missing"`)
+	require.ErrorContains(t, err, `node "pve1" is listed by more than one node_policies entry`)
+	require.ErrorContains(t, err, "node_policies[2].nodes must not be empty")
+}
+
+func TestNodePolicyValuesMustBeValid(t *testing.T) {
+	t.Parallel()
+
+	cfg := validStaticConfig(t)
+	cfg.NodePolicies = []nodePolicyConfig{
+		{
+			Nodes:                        []string{"pve1"},
+			ReserveMemoryMB:              int64Ptr(-1),
+			ReserveCPUCores:              intPtr(-1),
+			ReserveDiskGB:                int64Ptr(-1),
+			ReserveMemoryPercent:         intPtr(101),
+			ReserveCPUPercent:            intPtr(101),
+			ReserveDiskPercent:           intPtr(101),
+			MemoryAllocationLimitPercent: intPtr(-1),
+			CPUAllocationLimitPercent:    intPtr(-1),
+		},
+	}
+
+	err := cfg.validate(provider.Settings{})
+	require.ErrorContains(t, err, "node_policies[0].reserve_memory_mb must be >= 0")
+	require.ErrorContains(t, err, "node_policies[0].reserve_cpu_cores must be >= 0")
+	require.ErrorContains(t, err, "node_policies[0].reserve_disk_gb must be >= 0")
+	require.ErrorContains(t, err, "node_policies[0].reserve_memory_percent must be between 0 and 100")
+	require.ErrorContains(t, err, "node_policies[0].reserve_cpu_percent must be between 0 and 100")
+	require.ErrorContains(t, err, "node_policies[0].reserve_disk_percent must be between 0 and 100")
+	require.ErrorContains(t, err, "node_policies[0].memory_allocation_limit_percent must be >= 0")
+	require.ErrorContains(t, err, "node_policies[0].cpu_allocation_limit_percent must be >= 0")
+}
+
+func TestNodePolicyDiskReserveRequiresTargetStorages(t *testing.T) {
+	t.Parallel()
+
+	cfg := validStaticConfig(t)
+	cfg.NodePolicies = []nodePolicyConfig{
+		{Nodes: []string{"pve1"}, ReserveDiskGB: int64Ptr(10)},
+	}
+
+	err := cfg.validate(provider.Settings{})
+	require.ErrorContains(t, err, "node_policies reserve_disk requires target_storages")
+}
+
 func validStaticConfig(t *testing.T) pluginConfig {
 	t.Helper()
 
@@ -249,4 +342,12 @@ func validDHCPConfig(t *testing.T) pluginConfig {
 	cfg.IPPoolRanges = nil
 	cfg.StateFile = ""
 	return cfg
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
+func intPtr(v int) *int {
+	return &v
 }

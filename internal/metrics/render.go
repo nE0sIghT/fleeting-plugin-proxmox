@@ -22,16 +22,21 @@ func renderPrometheus(w io.Writer, snapshots []storedSnapshot, now time.Time, st
 	writeMetricHeader(w, "fleeting_proxmox_pending_instances", "Provisioning plans reserved locally by the plugin and not yet completed.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_node_total_cpu_cores", "Total CPU cores reported for the Proxmox node.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_node_runtime_free_cpu_cores", "Current free CPU cores estimated from Proxmox node utilization.", "gauge")
+	writeMetricHeader(w, "fleeting_proxmox_node_reserved_cpu_cores", "Configured CPU reserve for the node after per-node policy resolution.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_node_allocated_cpu_cores", "Committed vCPU cores from running non-template QEMU VMs plus in-flight plugin reservations.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_node_cpu_allocation_limit_cores", "Configured committed vCPU limit for the node. Zero means disabled.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_node_allocation_free_cpu_cores", "Remaining committed vCPU allocation headroom. Zero when the allocation limit is disabled.", "gauge")
+	writeMetricHeader(w, "fleeting_proxmox_node_physical_allocation_free_cpu_cores", "Remaining committed vCPU headroom against physical node CPU capacity.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_node_total_memory_bytes", "Total memory reported for the Proxmox node.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_node_runtime_free_memory_bytes", "Current free node memory reported by Proxmox.", "gauge")
+	writeMetricHeader(w, "fleeting_proxmox_node_reserved_memory_bytes", "Configured memory reserve for the node after per-node policy resolution.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_node_allocated_memory_bytes", "Committed memory from running non-template QEMU VMs plus in-flight plugin reservations.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_node_memory_allocation_limit_bytes", "Configured committed memory limit for the node. Zero means disabled.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_node_allocation_free_memory_bytes", "Remaining committed memory allocation headroom. Zero when the allocation limit is disabled.", "gauge")
+	writeMetricHeader(w, "fleeting_proxmox_node_physical_allocation_free_memory_bytes", "Remaining committed memory headroom against physical node memory capacity.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_storage_total_bytes", "Total capacity of an eligible target storage.", "gauge")
 	writeMetricHeader(w, "fleeting_proxmox_storage_free_bytes", "Free capacity of an eligible target storage.", "gauge")
+	writeMetricHeader(w, "fleeting_proxmox_storage_reserved_bytes", "Configured storage reserve for this node and storage after per-node policy resolution.", "gauge")
 
 	sort.Slice(snapshots, func(i, j int) bool {
 		return snapshots[i].Snapshot.Identity.Key() < snapshots[j].Snapshot.Identity.Key()
@@ -68,14 +73,18 @@ func renderPrometheus(w io.Writer, snapshots []storedSnapshot, now time.Time, st
 			nodeLabels := appendLabel(labels, "node", node.Node)
 			writeSample(w, "fleeting_proxmox_node_total_cpu_cores", nodeLabels, node.TotalCPUCores)
 			writeSample(w, "fleeting_proxmox_node_runtime_free_cpu_cores", nodeLabels, node.RuntimeFreeCPUCores)
+			writeSample(w, "fleeting_proxmox_node_reserved_cpu_cores", nodeLabels, node.ReservedCPUCores)
 			writeSample(w, "fleeting_proxmox_node_allocated_cpu_cores", nodeLabels, node.AllocatedCPUCores)
 			writeSample(w, "fleeting_proxmox_node_cpu_allocation_limit_cores", nodeLabels, node.CPUAllocationLimitCores)
 			writeSample(w, "fleeting_proxmox_node_allocation_free_cpu_cores", nodeLabels, allocationFree(node.CPUAllocationLimitCores, node.AllocatedCPUCores))
+			writeSample(w, "fleeting_proxmox_node_physical_allocation_free_cpu_cores", nodeLabels, node.PhysicalAllocationFreeCPUCores)
 			writeSample(w, "fleeting_proxmox_node_total_memory_bytes", nodeLabels, node.TotalMemoryBytes)
 			writeSample(w, "fleeting_proxmox_node_runtime_free_memory_bytes", nodeLabels, node.RuntimeFreeMemoryBytes)
+			writeSample(w, "fleeting_proxmox_node_reserved_memory_bytes", nodeLabels, node.ReservedMemoryBytes)
 			writeSample(w, "fleeting_proxmox_node_allocated_memory_bytes", nodeLabels, node.AllocatedMemoryBytes)
 			writeSample(w, "fleeting_proxmox_node_memory_allocation_limit_bytes", nodeLabels, node.MemoryAllocationLimitBytes)
 			writeSample(w, "fleeting_proxmox_node_allocation_free_memory_bytes", nodeLabels, allocationFree(node.MemoryAllocationLimitBytes, node.AllocatedMemoryBytes))
+			writeSample(w, "fleeting_proxmox_node_physical_allocation_free_memory_bytes", nodeLabels, node.PhysicalAllocationFreeMemoryBytes)
 		}
 
 		storages := append([]StorageSnapshot(nil), snapshot.Storages...)
@@ -89,6 +98,7 @@ func renderPrometheus(w io.Writer, snapshots []storedSnapshot, now time.Time, st
 			storageLabels := appendLabel(appendLabel(labels, "node", storage.Node), "storage", storage.Storage)
 			writeSample(w, "fleeting_proxmox_storage_total_bytes", storageLabels, storage.TotalBytes)
 			writeSample(w, "fleeting_proxmox_storage_free_bytes", storageLabels, storage.FreeBytes)
+			writeSample(w, "fleeting_proxmox_storage_reserved_bytes", storageLabels, storage.ReservedBytes)
 		}
 	}
 }

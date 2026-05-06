@@ -24,6 +24,12 @@ type Reserve struct {
 	CPUPercent    int
 }
 
+type NodePolicy struct {
+	Reserve                      Reserve
+	MemoryAllocationLimitPercent int
+	CPUAllocationLimitPercent    int
+}
+
 type Requirement struct {
 	MemoryMB float64
 	DiskGB   float64
@@ -45,6 +51,8 @@ type Node struct {
 	FreeCPUCores            float64
 	AllocatedCPUCores       float64
 	CPUAllocationLimitCores float64
+	Reserve                 Reserve
+	ReserveSet              bool
 }
 
 type Scheduler struct {
@@ -73,7 +81,7 @@ func New(strategy string) *Scheduler {
 func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requirement) (Node, error) {
 	eligible := make([]Node, 0, len(nodes))
 	for _, node := range nodes {
-		if len(admissionFailures(node, reserve, requirement)) > 0 {
+		if len(admissionFailures(node, reserveFor(node, reserve), requirement)) > 0 {
 			continue
 		}
 		eligible = append(eligible, node)
@@ -86,25 +94,15 @@ func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requiremen
 	switch s.strategy {
 	case StrategyMostFreeRAM:
 		slices.SortStableFunc(eligible, func(a, b Node) int {
-			switch {
-			case effectiveFreeMemoryMB(a, reserve) > effectiveFreeMemoryMB(b, reserve):
-				return -1
-			case effectiveFreeMemoryMB(a, reserve) < effectiveFreeMemoryMB(b, reserve):
-				return 1
-			default:
-				return 0
-			}
+			scoreA := effectiveFreeMemoryMB(a, reserveFor(a, reserve))
+			scoreB := effectiveFreeMemoryMB(b, reserveFor(b, reserve))
+			return compareScore(scoreA, scoreB)
 		})
 	case StrategyMostFreeCPU:
 		slices.SortStableFunc(eligible, func(a, b Node) int {
-			switch {
-			case effectiveFreeCPUCores(a, reserve) > effectiveFreeCPUCores(b, reserve):
-				return -1
-			case effectiveFreeCPUCores(a, reserve) < effectiveFreeCPUCores(b, reserve):
-				return 1
-			default:
-				return 0
-			}
+			scoreA := effectiveFreeCPUCores(a, reserveFor(a, reserve))
+			scoreB := effectiveFreeCPUCores(b, reserveFor(b, reserve))
+			return compareScore(scoreA, scoreB)
 		})
 	case StrategyRoundRobin:
 		idx := s.next % len(eligible)
@@ -114,14 +112,7 @@ func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requiremen
 		slices.SortStableFunc(eligible, func(a, b Node) int {
 			scoreA := balancedScore(a, reserve)
 			scoreB := balancedScore(b, reserve)
-			switch {
-			case scoreA > scoreB:
-				return -1
-			case scoreA < scoreB:
-				return 1
-			default:
-				return 0
-			}
+			return compareScore(scoreA, scoreB)
 		})
 	}
 
@@ -131,7 +122,7 @@ func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requiremen
 func Diagnose(nodes []Node, reserve Reserve, requirement Requirement) []string {
 	reasons := make([]string, 0, len(nodes))
 	for _, node := range nodes {
-		parts := admissionFailures(node, reserve, requirement)
+		parts := admissionFailures(node, reserveFor(node, reserve), requirement)
 		if len(parts) == 0 {
 			continue
 		}
@@ -140,10 +131,22 @@ func Diagnose(nodes []Node, reserve Reserve, requirement Requirement) []string {
 	return reasons
 }
 
-func balancedScore(node Node, reserve Reserve) float64 {
+func balancedScore(node Node, fallback Reserve) float64 {
+	reserve := reserveFor(node, fallback)
 	return effectiveFreeMemoryMB(node, reserve) +
 		(effectiveFreeDiskGB(node, reserve) * 10) +
 		(effectiveFreeCPUCores(node, reserve) * 1024)
+}
+
+func compareScore(a, b float64) int {
+	switch {
+	case a > b:
+		return -1
+	case a < b:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func admissionFailures(node Node, reserve Reserve, requirement Requirement) []string {
@@ -179,11 +182,9 @@ func admissionFailures(node Node, reserve Reserve, requirement Requirement) []st
 
 func effectiveFreeMemoryMB(node Node, reserve Reserve) float64 {
 	free := node.FreeMemoryMB - reserve.memoryMBFor(node)
-	if node.MemoryAllocationLimitMB > 0 {
-		allocationFree := node.MemoryAllocationLimitMB - node.AllocatedMemoryMB
-		if allocationFree < free {
-			free = allocationFree
-		}
+	physicalFree := physicalFreeMemoryMB(node)
+	if physicalFree < free {
+		free = physicalFree
 	}
 	return free
 }
@@ -194,13 +195,52 @@ func effectiveFreeDiskGB(node Node, reserve Reserve) float64 {
 
 func effectiveFreeCPUCores(node Node, reserve Reserve) float64 {
 	free := node.FreeCPUCores - reserve.cpuCoresFor(node)
-	if node.CPUAllocationLimitCores > 0 {
-		allocationFree := node.CPUAllocationLimitCores - node.AllocatedCPUCores
-		if allocationFree < free {
-			free = allocationFree
-		}
+	physicalFree := physicalFreeCPUCores(node)
+	if physicalFree < free {
+		free = physicalFree
 	}
 	return free
+}
+
+func physicalFreeMemoryMB(node Node) float64 {
+	if node.TotalMemoryMB <= 0 {
+		return node.FreeMemoryMB
+	}
+	free := node.TotalMemoryMB - node.AllocatedMemoryMB
+	if free < 0 {
+		return 0
+	}
+	return free
+}
+
+func physicalFreeCPUCores(node Node) float64 {
+	if node.TotalCPUCores <= 0 {
+		return node.FreeCPUCores
+	}
+	free := node.TotalCPUCores - node.AllocatedCPUCores
+	if free < 0 {
+		return 0
+	}
+	return free
+}
+
+func reserveFor(node Node, fallback Reserve) Reserve {
+	if node.ReserveSet {
+		return node.Reserve
+	}
+	return fallback
+}
+
+func (r Reserve) MemoryMBFor(node Node) float64 {
+	return r.memoryMBFor(node)
+}
+
+func (r Reserve) DiskGBFor(node Node) float64 {
+	return r.diskGBFor(node)
+}
+
+func (r Reserve) CPUCoresFor(node Node) float64 {
+	return r.cpuCoresFor(node)
 }
 
 func (r Reserve) memoryMBFor(node Node) float64 {

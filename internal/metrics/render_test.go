@@ -28,19 +28,23 @@ func TestRenderPrometheusSnapshot(t *testing.T) {
 				PendingInstances: 1,
 				Nodes: []NodeSnapshot{
 					{
-						Node:                       "pve01",
-						TotalCPUCores:              64,
-						RuntimeFreeCPUCores:        40,
-						AllocatedCPUCores:          60,
-						CPUAllocationLimitCores:    64,
-						TotalMemoryBytes:           128 * 1024 * 1024 * 1024,
-						RuntimeFreeMemoryBytes:     64 * 1024 * 1024 * 1024,
-						AllocatedMemoryBytes:       96 * 1024 * 1024 * 1024,
-						MemoryAllocationLimitBytes: 128 * 1024 * 1024 * 1024,
+						Node:                              "pve01",
+						TotalCPUCores:                     64,
+						RuntimeFreeCPUCores:               40,
+						ReservedCPUCores:                  8,
+						AllocatedCPUCores:                 60,
+						CPUAllocationLimitCores:           64,
+						PhysicalAllocationFreeCPUCores:    4,
+						TotalMemoryBytes:                  128 * 1024 * 1024 * 1024,
+						RuntimeFreeMemoryBytes:            64 * 1024 * 1024 * 1024,
+						ReservedMemoryBytes:               16 * 1024 * 1024 * 1024,
+						AllocatedMemoryBytes:              96 * 1024 * 1024 * 1024,
+						MemoryAllocationLimitBytes:        128 * 1024 * 1024 * 1024,
+						PhysicalAllocationFreeMemoryBytes: 32 * 1024 * 1024 * 1024,
 					},
 				},
 				Storages: []StorageSnapshot{
-					{Node: "pve01", Storage: "nvme0", TotalBytes: 1000, FreeBytes: 250},
+					{Node: "pve01", Storage: "nvme0", TotalBytes: 1000, FreeBytes: 250, ReservedBytes: 100},
 				},
 			},
 			ReceivedUnix: 100,
@@ -51,8 +55,11 @@ func TestRenderPrometheusSnapshot(t *testing.T) {
 	require.Contains(t, text, `fleeting_proxmox_up{cluster="prod",pool="ci",group="arm64"} 1`)
 	require.Contains(t, text, `fleeting_proxmox_instances{cluster="prod",pool="ci",group="arm64",state="running"} 2`)
 	require.Contains(t, text, `fleeting_proxmox_pending_instances{cluster="prod",pool="ci",group="arm64"} 1`)
+	require.Contains(t, text, `fleeting_proxmox_node_reserved_cpu_cores{cluster="prod",pool="ci",group="arm64",node="pve01"} 8`)
 	require.Contains(t, text, `fleeting_proxmox_node_allocation_free_cpu_cores{cluster="prod",pool="ci",group="arm64",node="pve01"} 4`)
+	require.Contains(t, text, `fleeting_proxmox_node_physical_allocation_free_memory_bytes{cluster="prod",pool="ci",group="arm64",node="pve01"} 34359738368`)
 	require.Contains(t, text, `fleeting_proxmox_storage_free_bytes{cluster="prod",pool="ci",group="arm64",node="pve01",storage="nvme0"} 250`)
+	require.Contains(t, text, `fleeting_proxmox_storage_reserved_bytes{cluster="prod",pool="ci",group="arm64",node="pve01",storage="nvme0"} 100`)
 }
 
 func TestRenderPrometheusStaleSnapshotSuppressesResourceGauges(t *testing.T) {

@@ -103,6 +103,7 @@ With `template_stage_mode` enabled, the plugin works around the Proxmox limitati
 | `node_reserve_disk_percent` | int | no | `0` | Reserved free space on the target datastore, as a percentage of total capacity. Overrides `node_reserve_disk_gb` when set. |
 | `node_memory_allocation_limit_percent` | int | no | `0` | Maximum committed VM memory on a node as a percentage of node memory. `0` disables the allocation limit. |
 | `node_cpu_allocation_limit_percent` | int | no | `0` | Maximum committed VM vCPU on a node as a percentage of node CPU capacity. `0` disables the allocation limit. |
+| `node_policies` | array | no |  | Per-node overrides for reserve and committed allocation settings. Each entry applies to one or more configured `nodes`. |
 | `max_parallel_clones` | int | no | `2` | Maximum concurrent clone operations. |
 | `max_parallel_starts` | int | no | `4` | Maximum concurrent start operations. |
 | `max_parallel_deletes` | int | no | `2` | Maximum concurrent delete operations. |
@@ -245,7 +246,22 @@ For example, on a 64-core node:
 - `node_cpu_allocation_limit_percent = 150` allows up to 96 committed vCPU
 - `node_cpu_allocation_limit_percent = 0` disables the committed CPU filter
 
-The `most_free_ram`, `most_free_cpu`, and `balanced` scheduler strategies use the lower of runtime free headroom and allocation-limit headroom when ranking nodes.
+Per-node policies override any subset of these global placement settings for one or more nodes:
+
+```toml
+[[runners.autoscaler.plugin_config.node_policies]]
+nodes = ["pve01", "pve02"]
+reserve_memory_mb = 32768
+reserve_memory_percent = 0
+reserve_cpu_cores = 8
+reserve_disk_gb = 100
+memory_allocation_limit_percent = 100
+cpu_allocation_limit_percent = 200
+```
+
+Unset fields inherit the global value. Explicit `0` disables that field for the listed nodes, which is useful when a global percentage reserve is set and a node policy should switch back to an absolute reserve.
+
+The committed allocation limit is only an admission guard. The `most_free_ram`, `most_free_cpu`, and `balanced` scheduler strategies rank eligible nodes using current free resources capped by physical committed headroom, so a node with `cpu_allocation_limit_percent = 200` is allowed to accept more committed vCPU but is not treated as having more physical CPU than it actually has.
 
 ### Prometheus metrics
 

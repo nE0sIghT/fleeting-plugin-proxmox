@@ -62,7 +62,7 @@ func TestSelectRejectsCPUAllocationLimit(t *testing.T) {
 	require.Contains(t, err.Error(), "cpu allocation")
 }
 
-func TestMostFreeCPUUsesAllocationHeadroom(t *testing.T) {
+func TestMostFreeCPUUsesPhysicalCommittedHeadroom(t *testing.T) {
 	t.Parallel()
 
 	s := New(string(StrategyMostFreeCPU))
@@ -94,7 +94,39 @@ func TestMostFreeCPUUsesAllocationHeadroom(t *testing.T) {
 	require.Equal(t, "allocation-free", node.Name)
 }
 
-func TestMostFreeRAMUsesAllocationHeadroom(t *testing.T) {
+func TestMostFreeCPUDoesNotPreferHigherOvercommitLimit(t *testing.T) {
+	t.Parallel()
+
+	s := New(string(StrategyMostFreeCPU))
+	node, err := s.Select([]Node{
+		{
+			Name:                    "overcommitted",
+			TotalMemoryMB:           64000,
+			FreeMemoryMB:            64000,
+			TotalDiskGB:             1000,
+			FreeDiskGB:              1000,
+			TotalCPUCores:           64,
+			FreeCPUCores:            50,
+			AllocatedCPUCores:       64,
+			CPUAllocationLimitCores: 128,
+		},
+		{
+			Name:                    "physically-free",
+			TotalMemoryMB:           64000,
+			FreeMemoryMB:            64000,
+			TotalDiskGB:             1000,
+			FreeDiskGB:              1000,
+			TotalCPUCores:           64,
+			FreeCPUCores:            40,
+			AllocatedCPUCores:       10,
+			CPUAllocationLimitCores: 64,
+		},
+	}, Reserve{}, Requirement{MemoryMB: 1024, DiskGB: 10, CPUCores: 1})
+	require.NoError(t, err)
+	require.Equal(t, "physically-free", node.Name)
+}
+
+func TestMostFreeRAMUsesPhysicalCommittedHeadroom(t *testing.T) {
 	t.Parallel()
 
 	s := New(string(StrategyMostFreeRAM))
@@ -124,4 +156,36 @@ func TestMostFreeRAMUsesAllocationHeadroom(t *testing.T) {
 	}, Reserve{}, Requirement{MemoryMB: 512, DiskGB: 10, CPUCores: 1})
 	require.NoError(t, err)
 	require.Equal(t, "allocation-free", node.Name)
+}
+
+func TestSelectUsesPerNodeReserve(t *testing.T) {
+	t.Parallel()
+
+	s := New(string(StrategyBalanced))
+	node, err := s.Select([]Node{
+		{
+			Name:          "global-reserve",
+			TotalMemoryMB: 8192,
+			FreeMemoryMB:  4096,
+			TotalDiskGB:   100,
+			FreeDiskGB:    50,
+			TotalCPUCores: 8,
+			FreeCPUCores:  4,
+			Reserve:       Reserve{MemoryMB: 3584},
+			ReserveSet:    true,
+		},
+		{
+			Name:          "node-reserve",
+			TotalMemoryMB: 8192,
+			FreeMemoryMB:  4096,
+			TotalDiskGB:   100,
+			FreeDiskGB:    50,
+			TotalCPUCores: 8,
+			FreeCPUCores:  4,
+			Reserve:       Reserve{MemoryMB: 1024},
+			ReserveSet:    true,
+		},
+	}, Reserve{MemoryMB: 3584}, Requirement{MemoryMB: 2048, DiskGB: 1, CPUCores: 1})
+	require.NoError(t, err)
+	require.Equal(t, "node-reserve", node.Name)
 }

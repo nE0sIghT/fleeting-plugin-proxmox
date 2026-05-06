@@ -61,6 +61,7 @@ type Config struct {
 	MemoryAllocationLimitPercent int
 	CPUAllocationLimitPercent    int
 	Reserve                      scheduler.Reserve
+	NodePolicies                 map[string]scheduler.NodePolicy
 }
 
 type ManagedInstance struct {
@@ -147,6 +148,7 @@ type nodePlanState struct {
 	FreeCPUCores            float64
 	AllocatedCPUCores       float64
 	CPUAllocationLimitCores float64
+	Reserve                 scheduler.Reserve
 	StorageTotalGB          map[string]float64
 	StorageFreeGB           map[string]float64
 }
@@ -907,24 +909,33 @@ func (g *Group) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
 	}
 
 	for _, state := range states {
+		resourceTotals := state.resourceTotals()
+		memoryReserveBytes := state.Reserve.MemoryMBFor(resourceTotals) * 1024.0 * 1024.0
+		cpuReserveCores := state.Reserve.CPUCoresFor(resourceTotals)
 		snapshot.Nodes = append(snapshot.Nodes, metrics.NodeSnapshot{
-			Node:                       state.Name,
-			TotalCPUCores:              state.TotalCPUCores,
-			RuntimeFreeCPUCores:        state.FreeCPUCores,
-			AllocatedCPUCores:          state.AllocatedCPUCores,
-			CPUAllocationLimitCores:    state.CPUAllocationLimitCores,
-			TotalMemoryBytes:           state.TotalMemoryMB * 1024.0 * 1024.0,
-			RuntimeFreeMemoryBytes:     state.FreeMemoryMB * 1024.0 * 1024.0,
-			AllocatedMemoryBytes:       state.AllocatedMemoryMB * 1024.0 * 1024.0,
-			MemoryAllocationLimitBytes: state.MemoryAllocationLimitMB * 1024.0 * 1024.0,
+			Node:                              state.Name,
+			TotalCPUCores:                     state.TotalCPUCores,
+			RuntimeFreeCPUCores:               state.FreeCPUCores,
+			ReservedCPUCores:                  cpuReserveCores,
+			AllocatedCPUCores:                 state.AllocatedCPUCores,
+			CPUAllocationLimitCores:           state.CPUAllocationLimitCores,
+			PhysicalAllocationFreeCPUCores:    physicalAllocationFree(state.TotalCPUCores, state.AllocatedCPUCores),
+			TotalMemoryBytes:                  state.TotalMemoryMB * 1024.0 * 1024.0,
+			RuntimeFreeMemoryBytes:            state.FreeMemoryMB * 1024.0 * 1024.0,
+			ReservedMemoryBytes:               memoryReserveBytes,
+			AllocatedMemoryBytes:              state.AllocatedMemoryMB * 1024.0 * 1024.0,
+			MemoryAllocationLimitBytes:        state.MemoryAllocationLimitMB * 1024.0 * 1024.0,
+			PhysicalAllocationFreeMemoryBytes: physicalAllocationFree(state.TotalMemoryMB, state.AllocatedMemoryMB) * 1024.0 * 1024.0,
 		})
 
 		for storage, freeGB := range state.StorageFreeGB {
+			schedulerNode := state.schedulerNode(storage)
 			snapshot.Storages = append(snapshot.Storages, metrics.StorageSnapshot{
-				Node:       state.Name,
-				Storage:    storage,
-				TotalBytes: state.StorageTotalGB[storage] * 1024.0 * 1024.0 * 1024.0,
-				FreeBytes:  freeGB * 1024.0 * 1024.0 * 1024.0,
+				Node:          state.Name,
+				Storage:       storage,
+				TotalBytes:    state.StorageTotalGB[storage] * 1024.0 * 1024.0 * 1024.0,
+				FreeBytes:     freeGB * 1024.0 * 1024.0 * 1024.0,
+				ReservedBytes: state.Reserve.DiskGBFor(schedulerNode) * 1024.0 * 1024.0 * 1024.0,
 			})
 		}
 	}
@@ -1653,6 +1664,7 @@ func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []pr
 
 		totalCPU := float64(status.CPUInfo.CPUs)
 		totalMemoryMB := float64(status.Memory.Total) / 1024.0 / 1024.0
+		policy := g.nodePolicy(node)
 		nodes = append(nodes, nodePlanState{
 			Name:                    node,
 			TemplateNode:            templateChoice.Resource.Node,
@@ -1660,10 +1672,11 @@ func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []pr
 			TemplateStorage:         templateChoice.Storage,
 			TotalMemoryMB:           totalMemoryMB,
 			FreeMemoryMB:            float64(status.Memory.Total-status.Memory.Used) / 1024.0 / 1024.0,
-			MemoryAllocationLimitMB: allocationLimit(totalMemoryMB, g.cfg.MemoryAllocationLimitPercent),
+			MemoryAllocationLimitMB: allocationLimit(totalMemoryMB, policy.MemoryAllocationLimitPercent),
 			TotalCPUCores:           totalCPU,
 			FreeCPUCores:            totalCPU - (status.CPU * totalCPU),
-			CPUAllocationLimitCores: allocationLimit(totalCPU, g.cfg.CPUAllocationLimitPercent),
+			CPUAllocationLimitCores: allocationLimit(totalCPU, policy.CPUAllocationLimitPercent),
+			Reserve:                 policy.Reserve,
 			StorageTotalGB:          storageTotal,
 			StorageFreeGB:           storageFree,
 		})
@@ -1692,22 +1705,9 @@ func (g *Group) buildCandidateNodes(states []nodePlanState) ([]scheduler.Node, [
 			}
 		}
 
-		nodes = append(nodes, scheduler.Node{
-			Name:                    state.Name,
-			TemplateNode:            state.TemplateNode,
-			TemplateVMID:            state.TemplateVMID,
-			TargetStorage:           targetStorage,
-			TotalMemoryMB:           state.TotalMemoryMB,
-			FreeMemoryMB:            state.FreeMemoryMB,
-			AllocatedMemoryMB:       state.AllocatedMemoryMB,
-			MemoryAllocationLimitMB: state.MemoryAllocationLimitMB,
-			TotalDiskGB:             state.StorageTotalGB[targetStorage],
-			FreeDiskGB:              freeDiskGB,
-			TotalCPUCores:           state.TotalCPUCores,
-			FreeCPUCores:            state.FreeCPUCores,
-			AllocatedCPUCores:       state.AllocatedCPUCores,
-			CPUAllocationLimitCores: state.CPUAllocationLimitCores,
-		})
+		node := state.schedulerNode(targetStorage)
+		node.FreeDiskGB = freeDiskGB
+		nodes = append(nodes, node)
 	}
 	return nodes, skipped
 }
@@ -1728,6 +1728,54 @@ func allocationLimit(total float64, percent int) float64 {
 	return total * float64(percent) / 100.0
 }
 
+func (g *Group) nodePolicy(node string) scheduler.NodePolicy {
+	if policy, ok := g.cfg.NodePolicies[node]; ok {
+		return policy
+	}
+	return scheduler.NodePolicy{
+		Reserve:                      g.cfg.Reserve,
+		MemoryAllocationLimitPercent: g.cfg.MemoryAllocationLimitPercent,
+		CPUAllocationLimitPercent:    g.cfg.CPUAllocationLimitPercent,
+	}
+}
+
+func (s nodePlanState) schedulerNode(targetStorage string) scheduler.Node {
+	return scheduler.Node{
+		Name:                    s.Name,
+		TemplateNode:            s.TemplateNode,
+		TemplateVMID:            s.TemplateVMID,
+		TargetStorage:           targetStorage,
+		TotalMemoryMB:           s.TotalMemoryMB,
+		FreeMemoryMB:            s.FreeMemoryMB,
+		AllocatedMemoryMB:       s.AllocatedMemoryMB,
+		MemoryAllocationLimitMB: s.MemoryAllocationLimitMB,
+		TotalDiskGB:             s.StorageTotalGB[targetStorage],
+		FreeDiskGB:              s.StorageFreeGB[targetStorage],
+		TotalCPUCores:           s.TotalCPUCores,
+		FreeCPUCores:            s.FreeCPUCores,
+		AllocatedCPUCores:       s.AllocatedCPUCores,
+		CPUAllocationLimitCores: s.CPUAllocationLimitCores,
+		Reserve:                 s.Reserve,
+		ReserveSet:              true,
+	}
+}
+
+func (s nodePlanState) resourceTotals() scheduler.Node {
+	return scheduler.Node{
+		Name:          s.Name,
+		TotalMemoryMB: s.TotalMemoryMB,
+		TotalCPUCores: s.TotalCPUCores,
+	}
+}
+
+func physicalAllocationFree(total, allocated float64) float64 {
+	free := total - allocated
+	if free < 0 {
+		return 0
+	}
+	return free
+}
+
 func (g *Group) diagnosticNodes(states []nodePlanState) []scheduler.Node {
 	nodes := make([]scheduler.Node, 0, len(states))
 	for _, state := range states {
@@ -1739,22 +1787,9 @@ func (g *Group) diagnosticNodes(states []nodePlanState) []scheduler.Node {
 				freeDiskGB = free
 			}
 		}
-		nodes = append(nodes, scheduler.Node{
-			Name:                    state.Name,
-			TemplateNode:            state.TemplateNode,
-			TemplateVMID:            state.TemplateVMID,
-			TargetStorage:           targetStorage,
-			TotalMemoryMB:           state.TotalMemoryMB,
-			FreeMemoryMB:            state.FreeMemoryMB,
-			AllocatedMemoryMB:       state.AllocatedMemoryMB,
-			MemoryAllocationLimitMB: state.MemoryAllocationLimitMB,
-			TotalDiskGB:             state.StorageTotalGB[targetStorage],
-			FreeDiskGB:              freeDiskGB,
-			TotalCPUCores:           state.TotalCPUCores,
-			FreeCPUCores:            state.FreeCPUCores,
-			AllocatedCPUCores:       state.AllocatedCPUCores,
-			CPUAllocationLimitCores: state.CPUAllocationLimitCores,
-		})
+		node := state.schedulerNode(targetStorage)
+		node.FreeDiskGB = freeDiskGB
+		nodes = append(nodes, node)
 	}
 	return nodes
 }
