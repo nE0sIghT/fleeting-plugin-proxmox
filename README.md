@@ -110,6 +110,8 @@ With `template_stage_mode` enabled, the plugin works around the Proxmox limitati
 | `clone_timeout` | duration string | no | `10m` | Timeout for clone operations. |
 | `start_timeout` | duration string | no | `5m` | Timeout for VM start and readiness wait. |
 | `shutdown_timeout` | duration string | no | `2m` | Timeout for stop-and-delete task completion during instance removal. |
+| `metrics_socket` | path string | no |  | Unix socket used to publish metrics snapshots to a local `metrics-exporter` process. Empty disables metrics. |
+| `metrics_interval` | duration string | no | `15s` when `metrics_socket` is set | Interval for publishing metrics snapshots. |
 
 #### Cloud-Init and networking
 
@@ -244,6 +246,43 @@ For example, on a 64-core node:
 - `node_cpu_allocation_limit_percent = 0` disables the committed CPU filter
 
 The `most_free_ram`, `most_free_cpu`, and `balanced` scheduler strategies use the lower of runtime free headroom and allocation-limit headroom when ranking nodes.
+
+### Prometheus metrics
+
+Multiple GitLab Runner autoscaler entries can start separate plugin processes on the same host. To avoid per-process port conflicts, the plugin publishes metrics snapshots to a local Unix socket and a single exporter process exposes one Prometheus endpoint.
+
+Start the exporter with the same binary:
+
+```shell
+/usr/local/bin/fleeting-plugin-proxmox metrics-exporter \
+  --listen 0.0.0.0:9252 \
+  --socket /run/fleeting-plugin-proxmox/metrics.sock
+```
+
+Use `--listen 127.0.0.1:9252` when Prometheus or an agent scrapes locally.
+
+Then enable reporting in each plugin config:
+
+```toml
+metrics_socket = "/run/fleeting-plugin-proxmox/metrics.sock"
+metrics_interval = "15s"
+```
+
+The reporter does not fail plugin initialization when the socket is missing. It retries until the exporter appears, and reconnects on later exporter restarts.
+
+An example systemd service is provided at [`examples/fleeting-plugin-proxmox-metrics-exporter.service`](/workspace/fleeting-plugin-proxmox/examples/fleeting-plugin-proxmox-metrics-exporter.service).
+
+Prometheus can scrape the exporter directly:
+
+```yaml
+scrape_configs:
+  - job_name: fleeting-proxmox
+    static_configs:
+      - targets:
+          - gitlab-fleeting1:9252
+```
+
+All plugin metrics include `cluster`, `pool`, and `group` labels. Per-node metrics also include `node`; storage metrics include `storage`.
 
 ## Runner Configuration
 

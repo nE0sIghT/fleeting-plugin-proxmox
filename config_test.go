@@ -170,6 +170,28 @@ func TestIPReuseCooldownMustNotBeNegative(t *testing.T) {
 	require.ErrorContains(t, err, "ip_pool_reuse_cooldown must be >= 0")
 }
 
+func TestMetricsIntervalDefaultsWhenSocketIsConfigured(t *testing.T) {
+	t.Parallel()
+
+	cfg := validStaticConfig(t)
+	cfg.MetricsSocket = "/run/fleeting-plugin-proxmox/metrics.sock"
+
+	require.NoError(t, cfg.validate(provider.Settings{}))
+	require.Equal(t, defaultMetricsInterval.String(), cfg.MetricsInterval)
+	require.Equal(t, defaultMetricsInterval, cfg.parsedMetricsInterval)
+}
+
+func TestMetricsIntervalMustBePositive(t *testing.T) {
+	t.Parallel()
+
+	cfg := validStaticConfig(t)
+	cfg.MetricsSocket = "/run/fleeting-plugin-proxmox/metrics.sock"
+	cfg.MetricsInterval = "0s"
+
+	err := cfg.validate(provider.Settings{})
+	require.ErrorContains(t, err, "metrics_interval must be > 0")
+}
+
 func TestReserveValuesMustBeNonNegative(t *testing.T) {
 	t.Parallel()
 

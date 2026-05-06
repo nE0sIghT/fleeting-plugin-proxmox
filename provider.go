@@ -17,6 +17,7 @@ import (
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/instancegroup"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/ippool"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/limiter"
+	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/metrics"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/proxmoxclient"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/scheduler"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/state"
@@ -30,9 +31,10 @@ type InstanceGroup struct {
 	log      hclog.Logger
 	settings provider.Settings
 
-	client *proxmoxclient.Client
-	group  *instancegroup.Group
-	sshPub string
+	client          *proxmoxclient.Client
+	group           *instancegroup.Group
+	metricsReporter *metrics.Reporter
+	sshPub          string
 }
 
 func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings provider.Settings) (provider.ProviderInfo, error) {
@@ -141,6 +143,21 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	if err := g.group.Init(ctx); err != nil {
 		return provider.ProviderInfo{}, err
 	}
+	if g.MetricsSocket != "" {
+		g.metricsReporter = metrics.NewReporter(metrics.ReporterConfig{
+			SocketPath: g.MetricsSocket,
+			Interval:   g.parsedMetricsInterval,
+			Identity: metrics.Identity{
+				Cluster: g.ClusterName,
+				Pool:    g.Pool,
+				Group:   g.NamePrefix,
+			},
+			Collect: g.group.MetricsSnapshot,
+			Info:    g.log.Info,
+			Warn:    g.log.Warn,
+		})
+		g.metricsReporter.Start()
+	}
 
 	return provider.ProviderInfo{
 		ID:        path.Join("proxmox", g.ClusterName, g.Pool, g.NamePrefix),
@@ -187,6 +204,10 @@ func (g *InstanceGroup) Heartbeat(ctx context.Context, instance string) error {
 }
 
 func (g *InstanceGroup) Shutdown(ctx context.Context) error {
+	if g.metricsReporter != nil {
+		g.metricsReporter.Shutdown(ctx)
+		g.metricsReporter = nil
+	}
 	if g.group == nil {
 		return nil
 	}

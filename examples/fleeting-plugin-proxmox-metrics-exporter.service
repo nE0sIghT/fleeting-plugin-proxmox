@@ -1,0 +1,16 @@
+[Unit]
+Description=Fleeting Proxmox metrics exporter
+After=network.target
+
+[Service]
+Type=simple
+User=gitlab-runner
+Group=gitlab-runner
+RuntimeDirectory=fleeting-plugin-proxmox
+RuntimeDirectoryMode=0755
+ExecStart=/usr/local/bin/fleeting-plugin-proxmox metrics-exporter --listen 0.0.0.0:9252 --socket /run/fleeting-plugin-proxmox/metrics.sock
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

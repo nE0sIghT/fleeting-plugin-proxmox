@@ -17,6 +17,7 @@ import (
 
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/ippool"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/limiter"
+	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/metrics"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/proxmoxclient"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/scheduler"
 )
@@ -863,6 +864,96 @@ func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {
 	g.mu.Unlock()
 
 	return instances, nil
+}
+
+func (g *Group) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
+	vmResources, err := g.client.ListClusterResources(ctx, "vm")
+	if err != nil {
+		return metrics.Snapshot{}, err
+	}
+
+	var storageResources []proxmoxclient.ClusterResource
+	storageNodes := map[string]map[string]struct{}{}
+	if len(g.cfg.TargetStorages) > 0 {
+		storageResources, err = g.client.ListClusterResources(ctx, "storage")
+		if err != nil {
+			return metrics.Snapshot{}, err
+		}
+		storageNodes = indexStorageNodes(storageResources)
+	}
+
+	states, _, err := g.collectNodePlanStates(ctx, storageResources, storageNodes)
+	if err != nil {
+		return metrics.Snapshot{}, err
+	}
+
+	g.mu.Lock()
+	g.applyAllocatedResources(states, vmResources)
+	g.applyPendingReservations(states)
+	pendingInstances := len(g.pendingVMIDs)
+	instances := g.instanceStateCountsLocked(vmResources)
+	g.mu.Unlock()
+
+	snapshot := metrics.Snapshot{
+		Version:           1,
+		Identity:          metrics.Identity{Cluster: g.cfg.ClusterName, Pool: g.cfg.Pool, Group: g.cfg.NamePrefix},
+		Up:                true,
+		LastScrapeSuccess: true,
+		Instances:         instances,
+		PendingInstances:  pendingInstances,
+		Nodes:             make([]metrics.NodeSnapshot, 0, len(states)),
+	}
+
+	for _, state := range states {
+		snapshot.Nodes = append(snapshot.Nodes, metrics.NodeSnapshot{
+			Node:                       state.Name,
+			TotalCPUCores:              state.TotalCPUCores,
+			RuntimeFreeCPUCores:        state.FreeCPUCores,
+			AllocatedCPUCores:          state.AllocatedCPUCores,
+			CPUAllocationLimitCores:    state.CPUAllocationLimitCores,
+			TotalMemoryBytes:           state.TotalMemoryMB * 1024.0 * 1024.0,
+			RuntimeFreeMemoryBytes:     state.FreeMemoryMB * 1024.0 * 1024.0,
+			AllocatedMemoryBytes:       state.AllocatedMemoryMB * 1024.0 * 1024.0,
+			MemoryAllocationLimitBytes: state.MemoryAllocationLimitMB * 1024.0 * 1024.0,
+		})
+
+		for storage, freeGB := range state.StorageFreeGB {
+			snapshot.Storages = append(snapshot.Storages, metrics.StorageSnapshot{
+				Node:       state.Name,
+				Storage:    storage,
+				TotalBytes: state.StorageTotalGB[storage] * 1024.0 * 1024.0 * 1024.0,
+				FreeBytes:  freeGB * 1024.0 * 1024.0 * 1024.0,
+			})
+		}
+	}
+
+	return snapshot, nil
+}
+
+func (g *Group) instanceStateCountsLocked(resources []proxmoxclient.ClusterResource) map[string]int {
+	counts := map[string]int{}
+	seen := map[string]struct{}{}
+	for _, resource := range resources {
+		if !g.isManaged(resource) {
+			continue
+		}
+
+		id := instanceID(resource.Node, resource.VMID)
+		seen[id] = struct{}{}
+		state := mapState(resource.Status)
+		if transient, ok := g.transient[id]; ok {
+			state = transient
+		}
+		counts[string(state)]++
+	}
+
+	for id, accepted := range g.accepted {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		counts[string(accepted.State)]++
+	}
+	return counts
 }
 
 func (g *Group) Increase(ctx context.Context, delta int) ([]string, error) {

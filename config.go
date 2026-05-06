@@ -24,6 +24,7 @@ const (
 	defaultShutdownTimeout   = 2 * time.Minute
 	defaultAgentTimeout      = 3 * time.Minute
 	defaultIPReuseCooldown   = 0 * time.Second
+	defaultMetricsInterval   = 15 * time.Second
 	defaultStateDir          = "/var/lib/fleeting-plugin-proxmox"
 	defaultStateFileBasename = "state.json"
 )
@@ -75,6 +76,8 @@ type pluginConfig struct {
 	CloneTimeout     string `json:"clone_timeout"`
 	StartTimeout     string `json:"start_timeout"`
 	ShutdownTimeout  string `json:"shutdown_timeout"`
+	MetricsSocket    string `json:"metrics_socket"`
+	MetricsInterval  string `json:"metrics_interval"`
 
 	NetworkMode  string        `json:"network_mode"`
 	CIUser       string        `json:"ci_user"`
@@ -104,6 +107,7 @@ type pluginConfig struct {
 	parsedShutdownTimeout   time.Duration
 	parsedAgentTimeout      time.Duration
 	parsedIPReuseCooldown   time.Duration
+	parsedMetricsInterval   time.Duration
 	parsedPoolPrefix        netip.Prefix
 	parsedGateway           netip.Addr
 	agentRequiredSet        bool
@@ -176,6 +180,9 @@ func (c *pluginConfig) applyDefaults(settings provider.Settings) {
 	}
 	if c.ShutdownTimeout == "" {
 		c.ShutdownTimeout = defaultShutdownTimeout.String()
+	}
+	if c.MetricsSocket != "" && c.MetricsInterval == "" {
+		c.MetricsInterval = defaultMetricsInterval.String()
 	}
 	if c.IPPoolReuseCooldown == "" {
 		c.IPPoolReuseCooldown = defaultIPReuseCooldown.String()
@@ -314,6 +321,9 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	c.parsedShutdownTimeout = parsePositiveDurationField("shutdown_timeout", c.ShutdownTimeout, &errs)
 	c.parsedAgentTimeout = parsePositiveDurationField("agent_timeout", c.AgentTimeout, &errs)
 	c.parsedIPReuseCooldown = parseNonNegativeDurationField("ip_pool_reuse_cooldown", c.IPPoolReuseCooldown, &errs)
+	if c.MetricsSocket != "" {
+		c.parsedMetricsInterval = parsePositiveDurationField("metrics_interval", c.MetricsInterval, &errs)
+	}
 
 	if c.NetworkMode == "static" {
 		if c.IPPoolNetwork == "" {
@@ -375,6 +385,8 @@ func (c *pluginConfig) applyEnv() {
 	overrideEnv(&c.TokenSecret, "PROXMOX_TOKEN_SECRET")
 	overrideEnv(&c.TLSCAFile, "PROXMOX_TLS_CA_FILE")
 	overrideEnv(&c.StateFile, "PROXMOX_STATE_FILE")
+	overrideEnv(&c.MetricsSocket, "PROXMOX_METRICS_SOCKET")
+	overrideEnv(&c.MetricsInterval, "PROXMOX_METRICS_INTERVAL")
 }
 
 func (c *pluginConfig) mandatoryTags() []string {

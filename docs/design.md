@@ -78,6 +78,10 @@ The resource headroom check uses current free resources reported by Proxmox, not
 
 Optional CPU and memory allocation limits add a second check against committed VM sizing. When enabled, placement sums running non-template QEMU VM memory/vCPU visible to the API token on the configured node plus in-flight provisioning reservations, then rejects nodes where placing another VM would exceed the configured allocation percentage. Scheduler ranking also uses this allocation headroom so idle but heavily committed nodes do not look artificially free.
 
+## Metrics
+
+Each plugin process can publish a periodic JSON metrics snapshot to a local Unix socket. A separate `metrics-exporter` mode in the same binary listens on that socket, keeps the latest snapshot per `cluster/pool/name_prefix`, and exposes one Prometheus `/metrics` endpoint. This avoids port conflicts when GitLab Runner starts multiple plugin processes on the same host. Plugin reporters retry while the socket is absent and reconnect after exporter restarts.
+
 For `clone_mode = "auto"`, linked clones are used only when all of the following are true:
 
 - the template is local to the selected node
