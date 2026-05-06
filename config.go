@@ -57,13 +57,15 @@ type pluginConfig struct {
 	VMDiskMB       int64         `json:"vm_disk_mb"`
 	VMDiskDevice   string        `json:"vm_disk_device"`
 
-	NodeReserveMemoryMB      int64  `json:"node_reserve_memory_mb"`
-	NodeReserveMemoryPercent int    `json:"node_reserve_memory_percent"`
-	NodeReserveCPUCores      int    `json:"node_reserve_cpu_cores"`
-	NodeReserveCPUPercent    int    `json:"node_reserve_cpu_percent"`
-	NodeReserveDiskGB        int64  `json:"node_reserve_disk_gb"`
-	NodeReserveDiskPercent   int    `json:"node_reserve_disk_percent"`
-	Scheduler                string `json:"scheduler"`
+	NodeReserveMemoryMB              int64  `json:"node_reserve_memory_mb"`
+	NodeReserveMemoryPercent         int    `json:"node_reserve_memory_percent"`
+	NodeReserveCPUCores              int    `json:"node_reserve_cpu_cores"`
+	NodeReserveCPUPercent            int    `json:"node_reserve_cpu_percent"`
+	NodeReserveDiskGB                int64  `json:"node_reserve_disk_gb"`
+	NodeReserveDiskPercent           int    `json:"node_reserve_disk_percent"`
+	NodeMemoryAllocationLimitPercent int    `json:"node_memory_allocation_limit_percent"`
+	NodeCPUAllocationLimitPercent    int    `json:"node_cpu_allocation_limit_percent"`
+	Scheduler                        string `json:"scheduler"`
 
 	MaxParallelClones  int `json:"max_parallel_clones"`
 	MaxParallelStarts  int `json:"max_parallel_starts"`
@@ -251,6 +253,12 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	}
 	if c.NodeReserveDiskGB < 0 {
 		errs = append(errs, fmt.Errorf("node_reserve_disk_gb must be >= 0"))
+	}
+	if c.NodeMemoryAllocationLimitPercent < 0 {
+		errs = append(errs, fmt.Errorf("node_memory_allocation_limit_percent must be >= 0"))
+	}
+	if c.NodeCPUAllocationLimitPercent < 0 {
+		errs = append(errs, fmt.Errorf("node_cpu_allocation_limit_percent must be >= 0"))
 	}
 	if c.NodeReserveMemoryPercent < 0 || c.NodeReserveMemoryPercent > 100 {
 		errs = append(errs, fmt.Errorf("node_reserve_memory_percent must be between 0 and 100"))

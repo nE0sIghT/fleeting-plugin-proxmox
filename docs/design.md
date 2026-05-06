@@ -24,7 +24,7 @@
 - `internal/state`
   Persists lease state to disk with file locking.
 - `internal/scheduler`
-  Chooses a safe target node while honoring configured headroom.
+  Chooses a safe target node while honoring configured headroom and allocation limits.
 - datastore selection
   Chooses the most free datastore from a configured allowlist for the selected node.
 - `internal/limiter`
@@ -75,6 +75,8 @@ The scheduler only considers nodes from an explicit allowlist. A node is eligibl
 This minimizes impact on unrelated workloads already running on the same hypervisor.
 
 The resource headroom check uses current free resources reported by Proxmox, not a separate reservation model.
+
+Optional CPU and memory allocation limits add a second check against committed VM sizing. When enabled, placement sums running non-template QEMU VM memory/vCPU visible to the API token on the configured node plus in-flight provisioning reservations, then rejects nodes where placing another VM would exceed the configured allocation percentage. Scheduler ranking also uses this allocation headroom so idle but heavily committed nodes do not look artificially free.
 
 For `clone_mode = "auto"`, linked clones are used only when all of the following are true:
 

@@ -730,7 +730,7 @@ func TestTargetStorageMustExistOnSelectedNode(t *testing.T) {
 
 	_, err = group.Increase(context.Background(), 1)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "no eligible nodes satisfy configured headroom")
+	require.Contains(t, err.Error(), "no eligible nodes satisfy configured placement constraints")
 }
 
 func TestInitFailsWhenNodeHasNoLocalTemplateAndNoSharedTargetStorage(t *testing.T) {

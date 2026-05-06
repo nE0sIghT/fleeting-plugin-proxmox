@@ -177,11 +177,15 @@ func TestReserveValuesMustBeNonNegative(t *testing.T) {
 	cfg.NodeReserveMemoryMB = -1
 	cfg.NodeReserveCPUCores = -1
 	cfg.NodeReserveDiskGB = -1
+	cfg.NodeMemoryAllocationLimitPercent = -1
+	cfg.NodeCPUAllocationLimitPercent = -1
 
 	err := cfg.validate(provider.Settings{})
 	require.ErrorContains(t, err, "node_reserve_memory_mb must be >= 0")
 	require.ErrorContains(t, err, "node_reserve_cpu_cores must be >= 0")
 	require.ErrorContains(t, err, "node_reserve_disk_gb must be >= 0")
+	require.ErrorContains(t, err, "node_memory_allocation_limit_percent must be >= 0")
+	require.ErrorContains(t, err, "node_cpu_allocation_limit_percent must be >= 0")
 }
 
 func TestDiskReserveRequiresTargetStorages(t *testing.T) {

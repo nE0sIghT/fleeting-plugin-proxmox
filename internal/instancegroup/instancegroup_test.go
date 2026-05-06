@@ -106,7 +106,9 @@ func TestPendingReservationsAffectNextPlanningPass(t *testing.T) {
 
 	group.applyPendingReservations(states)
 	require.Equal(t, 1024.0, states[0].FreeMemoryMB)
+	require.Equal(t, 3072.0, states[0].AllocatedMemoryMB)
 	require.Equal(t, 2.0, states[0].FreeCPUCores)
+	require.Equal(t, 2.0, states[0].AllocatedCPUCores)
 	require.Equal(t, 80.0, states[0].StorageFreeGB["fast-a"])
 
 	candidates, skipped := group.buildCandidateNodes(states)
@@ -116,6 +118,33 @@ func TestPendingReservationsAffectNextPlanningPass(t *testing.T) {
 	selected, err := group.cfg.Scheduler.Select(candidates, scheduler.Reserve{}, req)
 	require.NoError(t, err)
 	require.Equal(t, "node2", selected.Name)
+}
+
+func TestApplyAllocatedResourcesCountsRunningVMs(t *testing.T) {
+	t.Parallel()
+
+	group := &Group{
+		pendingVMIDs: map[int]struct{}{5003: {}},
+	}
+	states := []nodePlanState{
+		{Name: "node1"},
+		{Name: "node2"},
+	}
+	resources := []proxmoxclient.ClusterResource{
+		{Type: "qemu", Node: "node1", VMID: 5001, Status: "running", MaxMem: 4 * 1024 * 1024 * 1024, MaxCPU: 2},
+		{Type: "qemu", Node: "node1", VMID: 5002, Status: "stopped", MaxMem: 8 * 1024 * 1024 * 1024, MaxCPU: 4},
+		{Type: "qemu", Node: "node1", VMID: 5003, Status: "running", MaxMem: 16 * 1024 * 1024 * 1024, MaxCPU: 8},
+		{Type: "qemu", Node: "node1", VMID: 2001, Template: 1, Status: "running", MaxMem: 8 * 1024 * 1024 * 1024, MaxCPU: 4},
+		{Type: "lxc", Node: "node1", VMID: 6001, Status: "running", MaxMem: 8 * 1024 * 1024 * 1024, MaxCPU: 4},
+		{Type: "qemu", Node: "node3", VMID: 7001, Status: "running", MaxMem: 8 * 1024 * 1024 * 1024, MaxCPU: 4},
+	}
+
+	group.applyAllocatedResources(states, resources)
+
+	require.Equal(t, 4096.0, states[0].AllocatedMemoryMB)
+	require.Equal(t, 2.0, states[0].AllocatedCPUCores)
+	require.Zero(t, states[1].AllocatedMemoryMB)
+	require.Zero(t, states[1].AllocatedCPUCores)
 }
 
 func TestIsManagedTemplate(t *testing.T) {

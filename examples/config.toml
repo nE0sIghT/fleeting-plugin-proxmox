@@ -43,6 +43,8 @@ check_interval = 3
     node_reserve_memory_percent = 10
     node_reserve_cpu_percent = 10
     node_reserve_disk_percent = 10
+    node_memory_allocation_limit_percent = 100
+    node_cpu_allocation_limit_percent = 100
 
     network_mode = "static"
     ci_user = "ubuntu"

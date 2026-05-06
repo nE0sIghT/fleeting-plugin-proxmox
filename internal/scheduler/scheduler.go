@@ -31,16 +31,20 @@ type Requirement struct {
 }
 
 type Node struct {
-	Name          string
-	TemplateNode  string
-	TemplateVMID  int
-	TargetStorage string
-	TotalMemoryMB float64
-	FreeMemoryMB  float64
-	TotalDiskGB   float64
-	FreeDiskGB    float64
-	TotalCPUCores float64
-	FreeCPUCores  float64
+	Name                    string
+	TemplateNode            string
+	TemplateVMID            int
+	TargetStorage           string
+	TotalMemoryMB           float64
+	FreeMemoryMB            float64
+	AllocatedMemoryMB       float64
+	MemoryAllocationLimitMB float64
+	TotalDiskGB             float64
+	FreeDiskGB              float64
+	TotalCPUCores           float64
+	FreeCPUCores            float64
+	AllocatedCPUCores       float64
+	CPUAllocationLimitCores float64
 }
 
 type Scheduler struct {
@@ -54,9 +58,9 @@ type PlacementError struct {
 
 func (e *PlacementError) Error() string {
 	if len(e.Reasons) == 0 {
-		return "no eligible nodes satisfy configured headroom"
+		return "no eligible nodes satisfy configured placement constraints"
 	}
-	return fmt.Sprintf("no eligible nodes satisfy configured headroom: %s", strings.Join(e.Reasons, "; "))
+	return fmt.Sprintf("no eligible nodes satisfy configured placement constraints: %s", strings.Join(e.Reasons, "; "))
 }
 
 func New(strategy string) *Scheduler {
@@ -69,20 +73,7 @@ func New(strategy string) *Scheduler {
 func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requirement) (Node, error) {
 	eligible := make([]Node, 0, len(nodes))
 	for _, node := range nodes {
-		memoryReserve := reserve.memoryMBFor(node)
-		diskReserve := reserve.diskGBFor(node)
-		cpuReserve := reserve.cpuCoresFor(node)
-
-		// Reserve is a placement guard against the node's current free capacity, not a
-		// Proxmox reservation primitive. Nodes that would dip below the configured
-		// headroom after placing one more VM are excluded.
-		if node.FreeMemoryMB-requirement.MemoryMB < memoryReserve {
-			continue
-		}
-		if node.FreeDiskGB-requirement.DiskGB < diskReserve {
-			continue
-		}
-		if node.FreeCPUCores-requirement.CPUCores < cpuReserve {
+		if len(admissionFailures(node, reserve, requirement)) > 0 {
 			continue
 		}
 		eligible = append(eligible, node)
@@ -96,9 +87,9 @@ func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requiremen
 	case StrategyMostFreeRAM:
 		slices.SortStableFunc(eligible, func(a, b Node) int {
 			switch {
-			case a.FreeMemoryMB > b.FreeMemoryMB:
+			case effectiveFreeMemoryMB(a, reserve) > effectiveFreeMemoryMB(b, reserve):
 				return -1
-			case a.FreeMemoryMB < b.FreeMemoryMB:
+			case effectiveFreeMemoryMB(a, reserve) < effectiveFreeMemoryMB(b, reserve):
 				return 1
 			default:
 				return 0
@@ -107,9 +98,9 @@ func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requiremen
 	case StrategyMostFreeCPU:
 		slices.SortStableFunc(eligible, func(a, b Node) int {
 			switch {
-			case a.FreeCPUCores > b.FreeCPUCores:
+			case effectiveFreeCPUCores(a, reserve) > effectiveFreeCPUCores(b, reserve):
 				return -1
-			case a.FreeCPUCores < b.FreeCPUCores:
+			case effectiveFreeCPUCores(a, reserve) < effectiveFreeCPUCores(b, reserve):
 				return 1
 			default:
 				return 0
@@ -121,8 +112,8 @@ func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requiremen
 		return eligible[idx], nil
 	default:
 		slices.SortStableFunc(eligible, func(a, b Node) int {
-			scoreA := a.FreeMemoryMB + (a.FreeDiskGB * 10) + (a.FreeCPUCores * 1024)
-			scoreB := b.FreeMemoryMB + (b.FreeDiskGB * 10) + (b.FreeCPUCores * 1024)
+			scoreA := balancedScore(a, reserve)
+			scoreB := balancedScore(b, reserve)
 			switch {
 			case scoreA > scoreB:
 				return -1
@@ -140,29 +131,76 @@ func (s *Scheduler) Select(nodes []Node, reserve Reserve, requirement Requiremen
 func Diagnose(nodes []Node, reserve Reserve, requirement Requirement) []string {
 	reasons := make([]string, 0, len(nodes))
 	for _, node := range nodes {
-		var parts []string
-		memoryReserve := reserve.memoryMBFor(node)
-		diskReserve := reserve.diskGBFor(node)
-		cpuReserve := reserve.cpuCoresFor(node)
-		if node.FreeMemoryMB-requirement.MemoryMB < memoryReserve {
-			parts = append(parts, fmt.Sprintf("memory free=%.0fMB need=%.0fMB reserve=%.0fMB", node.FreeMemoryMB, requirement.MemoryMB, memoryReserve))
-		}
-		if node.FreeDiskGB-requirement.DiskGB < diskReserve {
-			storage := node.TargetStorage
-			if storage == "" {
-				storage = "<default>"
-			}
-			parts = append(parts, fmt.Sprintf("disk[%s] free=%.1fGB need=%.1fGB reserve=%.1fGB", storage, node.FreeDiskGB, requirement.DiskGB, diskReserve))
-		}
-		if node.FreeCPUCores-requirement.CPUCores < cpuReserve {
-			parts = append(parts, fmt.Sprintf("cpu free=%.2f need=%.2f reserve=%.2f", node.FreeCPUCores, requirement.CPUCores, cpuReserve))
-		}
+		parts := admissionFailures(node, reserve, requirement)
 		if len(parts) == 0 {
 			continue
 		}
 		reasons = append(reasons, fmt.Sprintf("%s: %s", node.Name, strings.Join(parts, ", ")))
 	}
 	return reasons
+}
+
+func balancedScore(node Node, reserve Reserve) float64 {
+	return effectiveFreeMemoryMB(node, reserve) +
+		(effectiveFreeDiskGB(node, reserve) * 10) +
+		(effectiveFreeCPUCores(node, reserve) * 1024)
+}
+
+func admissionFailures(node Node, reserve Reserve, requirement Requirement) []string {
+	var parts []string
+	memoryReserve := reserve.memoryMBFor(node)
+	diskReserve := reserve.diskGBFor(node)
+	cpuReserve := reserve.cpuCoresFor(node)
+
+	// Reserve is a placement guard against the node's current free capacity, not a
+	// Proxmox reservation primitive. Nodes that would dip below the configured
+	// headroom after placing one more VM are excluded.
+	if node.FreeMemoryMB-requirement.MemoryMB < memoryReserve {
+		parts = append(parts, fmt.Sprintf("memory free=%.0fMB need=%.0fMB reserve=%.0fMB", node.FreeMemoryMB, requirement.MemoryMB, memoryReserve))
+	}
+	if node.MemoryAllocationLimitMB > 0 && node.MemoryAllocationLimitMB-node.AllocatedMemoryMB < requirement.MemoryMB {
+		parts = append(parts, fmt.Sprintf("memory allocation allocated=%.0fMB need=%.0fMB limit=%.0fMB", node.AllocatedMemoryMB, requirement.MemoryMB, node.MemoryAllocationLimitMB))
+	}
+	if node.FreeDiskGB-requirement.DiskGB < diskReserve {
+		storage := node.TargetStorage
+		if storage == "" {
+			storage = "<default>"
+		}
+		parts = append(parts, fmt.Sprintf("disk[%s] free=%.1fGB need=%.1fGB reserve=%.1fGB", storage, node.FreeDiskGB, requirement.DiskGB, diskReserve))
+	}
+	if node.FreeCPUCores-requirement.CPUCores < cpuReserve {
+		parts = append(parts, fmt.Sprintf("cpu free=%.2f need=%.2f reserve=%.2f", node.FreeCPUCores, requirement.CPUCores, cpuReserve))
+	}
+	if node.CPUAllocationLimitCores > 0 && node.CPUAllocationLimitCores-node.AllocatedCPUCores < requirement.CPUCores {
+		parts = append(parts, fmt.Sprintf("cpu allocation allocated=%.2f need=%.2f limit=%.2f", node.AllocatedCPUCores, requirement.CPUCores, node.CPUAllocationLimitCores))
+	}
+	return parts
+}
+
+func effectiveFreeMemoryMB(node Node, reserve Reserve) float64 {
+	free := node.FreeMemoryMB - reserve.memoryMBFor(node)
+	if node.MemoryAllocationLimitMB > 0 {
+		allocationFree := node.MemoryAllocationLimitMB - node.AllocatedMemoryMB
+		if allocationFree < free {
+			free = allocationFree
+		}
+	}
+	return free
+}
+
+func effectiveFreeDiskGB(node Node, reserve Reserve) float64 {
+	return node.FreeDiskGB - reserve.diskGBFor(node)
+}
+
+func effectiveFreeCPUCores(node Node, reserve Reserve) float64 {
+	free := node.FreeCPUCores - reserve.cpuCoresFor(node)
+	if node.CPUAllocationLimitCores > 0 {
+		allocationFree := node.CPUAllocationLimitCores - node.AllocatedCPUCores
+		if allocationFree < free {
+			free = allocationFree
+		}
+	}
+	return free
 }
 
 func (r Reserve) memoryMBFor(node Node) float64 {

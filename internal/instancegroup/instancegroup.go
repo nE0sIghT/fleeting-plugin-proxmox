@@ -22,42 +22,44 @@ import (
 )
 
 type Config struct {
-	ClusterName           string
-	Pool                  string
-	TemplateVMIDs         []int
-	TemplateStageMode     string
-	TemplateVMIDMin       int
-	TemplateVMIDMax       int
-	TemplateNamePrefix    string
-	VMIDMin               int
-	VMIDMax               int
-	NamePrefix            string
-	Nodes                 []string
-	CloneMode             string
-	TargetStorages        []string
-	CloneSnapshot         string
-	VMMemoryMB            int64
-	VMCPUCores            int
-	VMDiskMB              int64
-	VMDiskDevice          string
-	MandatoryTags         []string
-	ManagedTemplateTags   []string
-	DescriptionTemplate   string
-	CloudInitInterface    string
-	NetworkMode           string
-	CIUser                string
-	NameServers           []string
-	SearchDomain          string
-	TaskPollInterval      time.Duration
-	CloneTimeout          time.Duration
-	StartTimeout          time.Duration
-	ShutdownTimeout       time.Duration
-	AgentTimeout          time.Duration
-	AgentRequired         bool
-	GeneratedSSHPublicKey string
-	StaticSSHPublicKeys   []string
-	Scheduler             *scheduler.Scheduler
-	Reserve               scheduler.Reserve
+	ClusterName                  string
+	Pool                         string
+	TemplateVMIDs                []int
+	TemplateStageMode            string
+	TemplateVMIDMin              int
+	TemplateVMIDMax              int
+	TemplateNamePrefix           string
+	VMIDMin                      int
+	VMIDMax                      int
+	NamePrefix                   string
+	Nodes                        []string
+	CloneMode                    string
+	TargetStorages               []string
+	CloneSnapshot                string
+	VMMemoryMB                   int64
+	VMCPUCores                   int
+	VMDiskMB                     int64
+	VMDiskDevice                 string
+	MandatoryTags                []string
+	ManagedTemplateTags          []string
+	DescriptionTemplate          string
+	CloudInitInterface           string
+	NetworkMode                  string
+	CIUser                       string
+	NameServers                  []string
+	SearchDomain                 string
+	TaskPollInterval             time.Duration
+	CloneTimeout                 time.Duration
+	StartTimeout                 time.Duration
+	ShutdownTimeout              time.Duration
+	AgentTimeout                 time.Duration
+	AgentRequired                bool
+	GeneratedSSHPublicKey        string
+	StaticSSHPublicKeys          []string
+	Scheduler                    *scheduler.Scheduler
+	MemoryAllocationLimitPercent int
+	CPUAllocationLimitPercent    int
+	Reserve                      scheduler.Reserve
 }
 
 type ManagedInstance struct {
@@ -130,16 +132,20 @@ type acceptedProvision struct {
 }
 
 type nodePlanState struct {
-	Name            string
-	TemplateNode    string
-	TemplateVMID    int
-	TemplateStorage string
-	TotalMemoryMB   float64
-	FreeMemoryMB    float64
-	TotalCPUCores   float64
-	FreeCPUCores    float64
-	StorageTotalGB  map[string]float64
-	StorageFreeGB   map[string]float64
+	Name                    string
+	TemplateNode            string
+	TemplateVMID            int
+	TemplateStorage         string
+	TotalMemoryMB           float64
+	FreeMemoryMB            float64
+	AllocatedMemoryMB       float64
+	MemoryAllocationLimitMB float64
+	TotalCPUCores           float64
+	FreeCPUCores            float64
+	AllocatedCPUCores       float64
+	CPUAllocationLimitCores float64
+	StorageTotalGB          map[string]float64
+	StorageFreeGB           map[string]float64
 }
 
 type templateChoice struct {
@@ -1094,6 +1100,7 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 	if len(vmids) == 0 && vmidErr != nil {
 		return nil, vmidErr
 	}
+	g.applyAllocatedResources(states, vmResources)
 	g.applyPendingReservations(states)
 	plans := make([]provisionPlan, 0, len(vmids))
 	var errs []error
@@ -1554,16 +1561,18 @@ func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []pr
 		totalCPU := float64(status.CPUInfo.CPUs)
 		totalMemoryMB := float64(status.Memory.Total) / 1024.0 / 1024.0
 		nodes = append(nodes, nodePlanState{
-			Name:            node,
-			TemplateNode:    templateChoice.Resource.Node,
-			TemplateVMID:    templateChoice.Resource.VMID,
-			TemplateStorage: templateChoice.Storage,
-			TotalMemoryMB:   totalMemoryMB,
-			FreeMemoryMB:    float64(status.Memory.Total-status.Memory.Used) / 1024.0 / 1024.0,
-			TotalCPUCores:   totalCPU,
-			FreeCPUCores:    totalCPU - (status.CPU * totalCPU),
-			StorageTotalGB:  storageTotal,
-			StorageFreeGB:   storageFree,
+			Name:                    node,
+			TemplateNode:            templateChoice.Resource.Node,
+			TemplateVMID:            templateChoice.Resource.VMID,
+			TemplateStorage:         templateChoice.Storage,
+			TotalMemoryMB:           totalMemoryMB,
+			FreeMemoryMB:            float64(status.Memory.Total-status.Memory.Used) / 1024.0 / 1024.0,
+			MemoryAllocationLimitMB: allocationLimit(totalMemoryMB, g.cfg.MemoryAllocationLimitPercent),
+			TotalCPUCores:           totalCPU,
+			FreeCPUCores:            totalCPU - (status.CPU * totalCPU),
+			CPUAllocationLimitCores: allocationLimit(totalCPU, g.cfg.CPUAllocationLimitPercent),
+			StorageTotalGB:          storageTotal,
+			StorageFreeGB:           storageFree,
 		})
 	}
 	return nodes, skipped, nil
@@ -1591,16 +1600,20 @@ func (g *Group) buildCandidateNodes(states []nodePlanState) ([]scheduler.Node, [
 		}
 
 		nodes = append(nodes, scheduler.Node{
-			Name:          state.Name,
-			TemplateNode:  state.TemplateNode,
-			TemplateVMID:  state.TemplateVMID,
-			TargetStorage: targetStorage,
-			TotalMemoryMB: state.TotalMemoryMB,
-			FreeMemoryMB:  state.FreeMemoryMB,
-			TotalDiskGB:   state.StorageTotalGB[targetStorage],
-			FreeDiskGB:    freeDiskGB,
-			TotalCPUCores: state.TotalCPUCores,
-			FreeCPUCores:  state.FreeCPUCores,
+			Name:                    state.Name,
+			TemplateNode:            state.TemplateNode,
+			TemplateVMID:            state.TemplateVMID,
+			TargetStorage:           targetStorage,
+			TotalMemoryMB:           state.TotalMemoryMB,
+			FreeMemoryMB:            state.FreeMemoryMB,
+			AllocatedMemoryMB:       state.AllocatedMemoryMB,
+			MemoryAllocationLimitMB: state.MemoryAllocationLimitMB,
+			TotalDiskGB:             state.StorageTotalGB[targetStorage],
+			FreeDiskGB:              freeDiskGB,
+			TotalCPUCores:           state.TotalCPUCores,
+			FreeCPUCores:            state.FreeCPUCores,
+			AllocatedCPUCores:       state.AllocatedCPUCores,
+			CPUAllocationLimitCores: state.CPUAllocationLimitCores,
 		})
 	}
 	return nodes, skipped
@@ -1615,6 +1628,13 @@ func stateTemplateStorage(states []nodePlanState, node string) string {
 	return ""
 }
 
+func allocationLimit(total float64, percent int) float64 {
+	if percent <= 0 || total <= 0 {
+		return 0
+	}
+	return total * float64(percent) / 100.0
+}
+
 func (g *Group) diagnosticNodes(states []nodePlanState) []scheduler.Node {
 	nodes := make([]scheduler.Node, 0, len(states))
 	for _, state := range states {
@@ -1627,16 +1647,20 @@ func (g *Group) diagnosticNodes(states []nodePlanState) []scheduler.Node {
 			}
 		}
 		nodes = append(nodes, scheduler.Node{
-			Name:          state.Name,
-			TemplateNode:  state.TemplateNode,
-			TemplateVMID:  state.TemplateVMID,
-			TargetStorage: targetStorage,
-			TotalMemoryMB: state.TotalMemoryMB,
-			FreeMemoryMB:  state.FreeMemoryMB,
-			TotalDiskGB:   state.StorageTotalGB[targetStorage],
-			FreeDiskGB:    freeDiskGB,
-			TotalCPUCores: state.TotalCPUCores,
-			FreeCPUCores:  state.FreeCPUCores,
+			Name:                    state.Name,
+			TemplateNode:            state.TemplateNode,
+			TemplateVMID:            state.TemplateVMID,
+			TargetStorage:           targetStorage,
+			TotalMemoryMB:           state.TotalMemoryMB,
+			FreeMemoryMB:            state.FreeMemoryMB,
+			AllocatedMemoryMB:       state.AllocatedMemoryMB,
+			MemoryAllocationLimitMB: state.MemoryAllocationLimitMB,
+			TotalDiskGB:             state.StorageTotalGB[targetStorage],
+			FreeDiskGB:              freeDiskGB,
+			TotalCPUCores:           state.TotalCPUCores,
+			FreeCPUCores:            state.FreeCPUCores,
+			AllocatedCPUCores:       state.AllocatedCPUCores,
+			CPUAllocationLimitCores: state.CPUAllocationLimitCores,
 		})
 	}
 	return nodes
@@ -1648,11 +1672,35 @@ func (g *Group) reservePlannedResources(states []nodePlanState, node scheduler.N
 			continue
 		}
 		states[i].FreeMemoryMB -= req.MemoryMB
+		states[i].AllocatedMemoryMB += req.MemoryMB
 		states[i].FreeCPUCores -= req.CPUCores
+		states[i].AllocatedCPUCores += req.CPUCores
 		if node.TargetStorage != "" {
 			states[i].StorageFreeGB[node.TargetStorage] -= req.DiskGB
 		}
 		return
+	}
+}
+
+func (g *Group) applyAllocatedResources(states []nodePlanState, resources []proxmoxclient.ClusterResource) {
+	stateByNode := make(map[string]*nodePlanState, len(states))
+	for i := range states {
+		stateByNode[states[i].Name] = &states[i]
+	}
+
+	for _, resource := range resources {
+		if resource.Type != "qemu" || resource.Template == 1 || resource.Status != "running" {
+			continue
+		}
+		if _, pending := g.pendingVMIDs[resource.VMID]; pending {
+			continue
+		}
+		state, ok := stateByNode[resource.Node]
+		if !ok {
+			continue
+		}
+		state.AllocatedMemoryMB += float64(resource.MaxMem) / 1024.0 / 1024.0
+		state.AllocatedCPUCores += resource.MaxCPU
 	}
 }
 
@@ -1663,7 +1711,9 @@ func (g *Group) applyPendingReservations(states []nodePlanState) {
 			continue
 		}
 		states[i].FreeMemoryMB -= pending.MemoryMB
+		states[i].AllocatedMemoryMB += pending.MemoryMB
 		states[i].FreeCPUCores -= pending.CPUCores
+		states[i].AllocatedCPUCores += pending.CPUCores
 		for storage, reserved := range pending.StorageGB {
 			states[i].StorageFreeGB[storage] -= reserved
 		}

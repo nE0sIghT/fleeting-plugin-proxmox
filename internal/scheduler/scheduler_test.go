@@ -40,3 +40,88 @@ func TestSelectUsesPercentReserve(t *testing.T) {
 	require.Contains(t, err.Error(), "disk")
 	require.Contains(t, err.Error(), "cpu")
 }
+
+func TestSelectRejectsCPUAllocationLimit(t *testing.T) {
+	t.Parallel()
+
+	s := New(string(StrategyMostFreeCPU))
+	_, err := s.Select([]Node{
+		{
+			Name:                    "a",
+			TotalMemoryMB:           64000,
+			FreeMemoryMB:            64000,
+			TotalDiskGB:             1000,
+			FreeDiskGB:              1000,
+			TotalCPUCores:           64,
+			FreeCPUCores:            64,
+			AllocatedCPUCores:       60,
+			CPUAllocationLimitCores: 64,
+		},
+	}, Reserve{}, Requirement{MemoryMB: 1024, DiskGB: 10, CPUCores: 8})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cpu allocation")
+}
+
+func TestMostFreeCPUUsesAllocationHeadroom(t *testing.T) {
+	t.Parallel()
+
+	s := New(string(StrategyMostFreeCPU))
+	node, err := s.Select([]Node{
+		{
+			Name:                    "runtime-free",
+			TotalMemoryMB:           64000,
+			FreeMemoryMB:            64000,
+			TotalDiskGB:             1000,
+			FreeDiskGB:              1000,
+			TotalCPUCores:           64,
+			FreeCPUCores:            60,
+			AllocatedCPUCores:       62,
+			CPUAllocationLimitCores: 64,
+		},
+		{
+			Name:                    "allocation-free",
+			TotalMemoryMB:           64000,
+			FreeMemoryMB:            64000,
+			TotalDiskGB:             1000,
+			FreeDiskGB:              1000,
+			TotalCPUCores:           64,
+			FreeCPUCores:            30,
+			AllocatedCPUCores:       20,
+			CPUAllocationLimitCores: 64,
+		},
+	}, Reserve{}, Requirement{MemoryMB: 1024, DiskGB: 10, CPUCores: 1})
+	require.NoError(t, err)
+	require.Equal(t, "allocation-free", node.Name)
+}
+
+func TestMostFreeRAMUsesAllocationHeadroom(t *testing.T) {
+	t.Parallel()
+
+	s := New(string(StrategyMostFreeRAM))
+	node, err := s.Select([]Node{
+		{
+			Name:                    "runtime-free",
+			TotalMemoryMB:           64000,
+			FreeMemoryMB:            60000,
+			MemoryAllocationLimitMB: 64000,
+			AllocatedMemoryMB:       63000,
+			TotalDiskGB:             1000,
+			FreeDiskGB:              1000,
+			TotalCPUCores:           64,
+			FreeCPUCores:            64,
+		},
+		{
+			Name:                    "allocation-free",
+			TotalMemoryMB:           64000,
+			FreeMemoryMB:            30000,
+			MemoryAllocationLimitMB: 64000,
+			AllocatedMemoryMB:       20000,
+			TotalDiskGB:             1000,
+			FreeDiskGB:              1000,
+			TotalCPUCores:           64,
+			FreeCPUCores:            64,
+		},
+	}, Reserve{}, Requirement{MemoryMB: 512, DiskGB: 10, CPUCores: 1})
+	require.NoError(t, err)
+	require.Equal(t, "allocation-free", node.Name)
+}

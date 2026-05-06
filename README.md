@@ -101,6 +101,8 @@ With `template_stage_mode` enabled, the plugin works around the Proxmox limitati
 | `node_reserve_cpu_percent` | int | no | `0` | Reserved CPU headroom on the node, as a percentage of total CPU capacity. Overrides `node_reserve_cpu_cores` when set. |
 | `node_reserve_disk_gb` | int64 | no | `0` | Reserved free space on the target datastore. |
 | `node_reserve_disk_percent` | int | no | `0` | Reserved free space on the target datastore, as a percentage of total capacity. Overrides `node_reserve_disk_gb` when set. |
+| `node_memory_allocation_limit_percent` | int | no | `0` | Maximum committed VM memory on a node as a percentage of node memory. `0` disables the allocation limit. |
+| `node_cpu_allocation_limit_percent` | int | no | `0` | Maximum committed VM vCPU on a node as a percentage of node CPU capacity. `0` disables the allocation limit. |
 | `max_parallel_clones` | int | no | `2` | Maximum concurrent clone operations. |
 | `max_parallel_starts` | int | no | `4` | Maximum concurrent start operations. |
 | `max_parallel_deletes` | int | no | `2` | Maximum concurrent delete operations. |
@@ -232,6 +234,16 @@ For CPU specifically, the plugin does not use load average. It converts the curr
 - `free_cpu_cores = total_cpus - (cpu_utilization * total_cpus)`
 
 They do not create reservations in Proxmox and they do not use a separate reservation accounting model.
+
+`node_memory_allocation_limit_percent` and `node_cpu_allocation_limit_percent` add a second admission filter based on committed VM sizing, not current utilization. When set, the plugin sums running non-template QEMU VMs visible to the API token on each configured node plus in-flight provisioning reservations, then rejects placements that would exceed the configured percentage of node memory or CPU capacity.
+
+For example, on a 64-core node:
+
+- `node_cpu_allocation_limit_percent = 100` allows up to 64 committed vCPU
+- `node_cpu_allocation_limit_percent = 150` allows up to 96 committed vCPU
+- `node_cpu_allocation_limit_percent = 0` disables the committed CPU filter
+
+The `most_free_ram`, `most_free_cpu`, and `balanced` scheduler strategies use the lower of runtime free headroom and allocation-limit headroom when ranking nodes.
 
 ## Runner Configuration
 
