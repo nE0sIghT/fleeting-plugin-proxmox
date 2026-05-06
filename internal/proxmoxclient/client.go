@@ -64,6 +64,121 @@ type ClusterResource struct {
 	CPU        float64 `json:"cpu"`
 }
 
+func (r *ClusterResource) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID         string     `json:"id"`
+		Type       string     `json:"type"`
+		PluginType string     `json:"plugintype"`
+		Pool       string     `json:"pool"`
+		Node       string     `json:"node"`
+		Name       string     `json:"name"`
+		Storage    string     `json:"storage"`
+		Tags       string     `json:"tags"`
+		Status     string     `json:"status"`
+		Template   laxInt     `json:"template"`
+		Shared     laxInt     `json:"shared"`
+		VMID       laxInt     `json:"vmid"`
+		Disk       laxInt64   `json:"disk"`
+		MaxMem     laxInt64   `json:"maxmem"`
+		MaxDisk    laxInt64   `json:"maxdisk"`
+		MaxCPU     laxFloat64 `json:"maxcpu"`
+		CPU        laxFloat64 `json:"cpu"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	*r = ClusterResource{
+		ID:         raw.ID,
+		Type:       raw.Type,
+		PluginType: raw.PluginType,
+		Pool:       raw.Pool,
+		Node:       raw.Node,
+		Name:       raw.Name,
+		Storage:    raw.Storage,
+		Tags:       raw.Tags,
+		Status:     raw.Status,
+		Template:   int(raw.Template),
+		Shared:     int(raw.Shared),
+		VMID:       int(raw.VMID),
+		Disk:       int64(raw.Disk),
+		MaxMem:     int64(raw.MaxMem),
+		MaxDisk:    int64(raw.MaxDisk),
+		MaxCPU:     float64(raw.MaxCPU),
+		CPU:        float64(raw.CPU),
+	}
+	return nil
+}
+
+type laxInt int
+type laxInt64 int64
+type laxFloat64 float64
+
+func (v *laxInt) UnmarshalJSON(data []byte) error {
+	n, err := parseLaxInt64(data)
+	if err != nil {
+		return err
+	}
+	*v = laxInt(n)
+	return nil
+}
+
+func (v *laxInt64) UnmarshalJSON(data []byte) error {
+	n, err := parseLaxInt64(data)
+	if err != nil {
+		return err
+	}
+	*v = laxInt64(n)
+	return nil
+}
+
+func (v *laxFloat64) UnmarshalJSON(data []byte) error {
+	text, err := laxNumberText(data)
+	if err != nil {
+		return err
+	}
+	if text == "" {
+		*v = 0
+		return nil
+	}
+	n, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return err
+	}
+	*v = laxFloat64(n)
+	return nil
+}
+
+func parseLaxInt64(data []byte) (int64, error) {
+	text, err := laxNumberText(data)
+	if err != nil {
+		return 0, err
+	}
+	if text == "" {
+		return 0, nil
+	}
+	if strings.ContainsAny(text, ".eE") {
+		n, err := strconv.ParseFloat(text, 64)
+		return int64(n), err
+	}
+	return strconv.ParseInt(text, 10, 64)
+}
+
+func laxNumberText(data []byte) (string, error) {
+	text := strings.TrimSpace(string(data))
+	if text == "" || text == "null" {
+		return "", nil
+	}
+	if strings.HasPrefix(text, `"`) {
+		var value string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(value), nil
+	}
+	return text, nil
+}
+
 type NodeStatus struct {
 	CPU     float64 `json:"cpu"`
 	CPUInfo struct {

@@ -89,6 +89,33 @@ func TestDecodeResponseIncludesProxmoxStatusMessage(t *testing.T) {
 	require.ErrorContains(t, err, `body={"data":null}`)
 }
 
+func TestClusterResourceAcceptsQuotedNumbers(t *testing.T) {
+	var resource ClusterResource
+	err := json.Unmarshal([]byte(`{
+		"id": "qemu/5000",
+		"type": "qemu",
+		"node": "pve01",
+		"vmid": "5000",
+		"template": "1",
+		"shared": "0",
+		"disk": "1073741824",
+		"maxmem": "4294967296",
+		"maxdisk": "21474836480",
+		"maxcpu": "2",
+		"cpu": "0.125"
+	}`), &resource)
+	require.NoError(t, err)
+
+	require.Equal(t, 5000, resource.VMID)
+	require.Equal(t, 1, resource.Template)
+	require.Equal(t, 0, resource.Shared)
+	require.Equal(t, int64(1073741824), resource.Disk)
+	require.Equal(t, int64(4294967296), resource.MaxMem)
+	require.Equal(t, int64(21474836480), resource.MaxDisk)
+	require.Equal(t, 2.0, resource.MaxCPU)
+	require.Equal(t, 0.125, resource.CPU)
+}
+
 func TestVMConfigCapturesNumberedDiskDevices(t *testing.T) {
 	var config VMConfig
 	err := json.Unmarshal([]byte(`{
