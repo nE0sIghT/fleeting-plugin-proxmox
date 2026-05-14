@@ -99,3 +99,68 @@ func TestPoolForgetRemovesLeaseImmediately(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "10.0.2.2", lease.IP.String())
 }
+
+func TestPoolAcquireIgnoresExistingLeaseOutsideCurrentPool(t *testing.T) {
+	t.Parallel()
+
+	store := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	oldPool, err := New(Config{
+		Prefix:        netip.MustParsePrefix("10.0.3.0/30"),
+		Gateway:       netip.MustParseAddr("10.0.3.1"),
+		Ranges:        []string{"10.0.3.2-10.0.3.2"},
+		ReuseCooldown: 0,
+	}, store)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	lease, err := oldPool.Acquire(ctx, "node1/100")
+	require.NoError(t, err)
+	require.Equal(t, "10.0.3.2", lease.IP.String())
+
+	newPool, err := New(Config{
+		Prefix:        netip.MustParsePrefix("10.0.4.0/30"),
+		Gateway:       netip.MustParseAddr("10.0.4.1"),
+		Ranges:        []string{"10.0.4.2-10.0.4.2"},
+		ReuseCooldown: 0,
+	}, store)
+	require.NoError(t, err)
+
+	lease, err = newPool.Acquire(ctx, "node1/100")
+	require.NoError(t, err)
+	require.Equal(t, "10.0.4.2", lease.IP.String())
+
+	snapshot, err := store.Read(ctx)
+	require.NoError(t, err)
+	require.NotContains(t, snapshot.Leases, "10.0.3.2")
+	require.Equal(t, "node1/100", snapshot.Leases["10.0.4.2"].Key)
+}
+
+func TestPoolReconcilePrunesAddressesOutsideCurrentPool(t *testing.T) {
+	t.Parallel()
+
+	store := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	pool, err := New(Config{
+		Prefix:        netip.MustParsePrefix("10.0.5.0/29"),
+		Gateway:       netip.MustParseAddr("10.0.5.1"),
+		Ranges:        []string{"10.0.5.2-10.0.5.3"},
+		Exclude:       []string{"10.0.5.3"},
+		ReuseCooldown: 0,
+	}, store)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, pool.Reconcile(ctx, map[string]netip.Addr{
+		"node1/100": netip.MustParseAddr("10.0.5.2"),
+		"node1/101": netip.MustParseAddr("10.0.5.3"),
+		"node1/102": netip.MustParseAddr("10.0.6.2"),
+	}))
+
+	snapshot, err := store.Read(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "node1/100", snapshot.Leases["10.0.5.2"].Key)
+	require.NotContains(t, snapshot.Leases, "10.0.5.3")
+	require.NotContains(t, snapshot.Leases, "10.0.6.2")
+	require.True(t, pool.Allows(netip.MustParseAddr("10.0.5.2")))
+	require.False(t, pool.Allows(netip.MustParseAddr("10.0.5.3")))
+	require.False(t, pool.Allows(netip.MustParseAddr("10.0.6.2")))
+}

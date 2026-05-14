@@ -135,6 +135,8 @@ With `template_stage_mode` enabled, the plugin works around the Proxmox limitati
 | `ip_pool_reuse_cooldown` | duration string | no | `0s` | Cooldown before a released static IP can be reused. |
 | `state_file` | path string | no | `/var/lib/fleeting-plugin-proxmox/<cluster>-<pool>-<name_prefix>-state.json` | Persistent allocator state file. |
 
+When `network_mode = "static"`, the configured pool is treated as desired state for managed VMs. On startup, managed VMs with static addresses outside the current `ip_pool_network`/`ip_pool_ranges` set, after `ip_pool_exclude`, are stopped, deleted, and replaced through normal scaling.
+
 #### Guest agent and metadata
 
 | Option | Type | Required | Default | Notes |
@@ -356,5 +358,6 @@ See [`examples/docker-autoscaler.config.toml`](/workspace/fleeting-plugin-proxmo
 - If `template_stage_mode` is enabled, also reserve a separate `template_vmid_range` for managed staged templates.
 - For non-shared template storage, managed staging can clone locally and then migrate the staged VM only when the target node has storage with the same storage ID.
 - Use a subnet dedicated to ephemeral runner VMs. Do not share it with manually managed VMs.
+- Changing the static IP pool is disruptive: managed VMs outside the new pool are deleted during plugin startup.
 - `network_mode = "dhcp"` skips the local IP allocator and requires the guest agent to report the acquired address.
 - For `docker-autoscaler`, the template VM must already contain a working Docker Engine configuration suitable for GitLab Runner.

@@ -26,9 +26,10 @@ type Lease struct {
 }
 
 type Pool struct {
-	cfg        Config
-	store      state.Store
-	candidates []netip.Addr
+	cfg          Config
+	store        state.Store
+	candidates   []netip.Addr
+	candidateSet map[string]struct{}
 }
 
 func New(cfg Config, store state.Store) (*Pool, error) {
@@ -40,10 +41,16 @@ func New(cfg Config, store state.Store) (*Pool, error) {
 		return nil, fmt.Errorf("ip pool has no allocatable addresses")
 	}
 
+	candidateSet := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidateSet[candidate.String()] = struct{}{}
+	}
+
 	return &Pool{
-		cfg:        cfg,
-		store:      store,
-		candidates: candidates,
+		cfg:          cfg,
+		store:        store,
+		candidates:   candidates,
+		candidateSet: candidateSet,
 	}, nil
 }
 
@@ -61,7 +68,12 @@ func (p *Pool) Acquire(ctx context.Context, key string) (Lease, error) {
 			}
 			addr, err := netip.ParseAddr(ip)
 			if err != nil {
-				return err
+				delete(snapshot.Leases, ip)
+				continue
+			}
+			if !p.Allows(addr) {
+				delete(snapshot.Leases, ip)
+				continue
 			}
 			out = Lease{IP: addr, Prefix: p.cfg.Prefix, Gateway: p.cfg.Gateway}
 			return nil
@@ -128,6 +140,15 @@ func (p *Pool) Reconcile(ctx context.Context, active map[string]netip.Addr) erro
 	return p.store.Update(ctx, func(snapshot *state.Snapshot) error {
 		now := time.Now()
 		for ip, record := range snapshot.Leases {
+			addr, err := netip.ParseAddr(ip)
+			if err != nil {
+				delete(snapshot.Leases, ip)
+				continue
+			}
+			if !p.Allows(addr) {
+				delete(snapshot.Leases, ip)
+				continue
+			}
 			if record.Key == "" {
 				continue
 			}
@@ -140,6 +161,9 @@ func (p *Pool) Reconcile(ctx context.Context, active map[string]netip.Addr) erro
 		}
 
 		for key, addr := range active {
+			if !p.Allows(addr) {
+				continue
+			}
 			snapshot.Leases[addr.String()] = state.LeaseRecord{
 				Key:         key,
 				AllocatedAt: now,
@@ -152,6 +176,11 @@ func (p *Pool) Reconcile(ctx context.Context, active map[string]netip.Addr) erro
 
 func (p *Pool) Contains(addr netip.Addr) bool {
 	return p.cfg.Prefix.Contains(addr)
+}
+
+func (p *Pool) Allows(addr netip.Addr) bool {
+	_, ok := p.candidateSet[addr.String()]
+	return ok
 }
 
 func buildCandidates(cfg Config) ([]netip.Addr, error) {

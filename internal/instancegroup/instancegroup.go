@@ -267,6 +267,11 @@ func (g *Group) Init(ctx context.Context) error {
 		return err
 	}
 
+	managed, err = g.cleanupManagedOutsideIPPool(ctx, managed)
+	if err != nil {
+		return err
+	}
+
 	active := make(map[string]netip.Addr, len(managed))
 	for _, instance := range managed {
 		if instance.IP.IsValid() {
@@ -310,6 +315,33 @@ func (g *Group) cleanupPreexistingStopped(ctx context.Context, resources []proxm
 	}
 
 	return nil
+}
+
+func (g *Group) cleanupManagedOutsideIPPool(ctx context.Context, instances []ManagedInstance) ([]ManagedInstance, error) {
+	if g.pool == nil || g.cfg.NetworkMode != "static" {
+		return instances, nil
+	}
+
+	remaining := instances[:0]
+	for _, instance := range instances {
+		if !instance.IP.IsValid() || g.pool.Allows(instance.IP) {
+			remaining = append(remaining, instance)
+			continue
+		}
+
+		g.log.Warn("deleting managed instance outside static IP pool", "instance", instance.ID, "ip", instance.IP.String())
+		if err := g.ensureVMStopped(ctx, instance.Node, instance.VMID); err != nil {
+			return nil, fmt.Errorf("stop managed instance %s outside static IP pool: %w", instance.ID, err)
+		}
+		if err := g.safeDestroyManagedVM(ctx, instance); err != nil {
+			return nil, fmt.Errorf("delete managed instance %s outside static IP pool: %w", instance.ID, err)
+		}
+		if err := g.pool.Forget(ctx, instance.ID); err != nil {
+			return nil, fmt.Errorf("forget lease for %s outside static IP pool: %w", instance.ID, err)
+		}
+	}
+
+	return remaining, nil
 }
 
 type managedTemplateArtifact struct {

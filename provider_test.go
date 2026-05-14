@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
+	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/state"
 )
 
 type mockVM struct {
@@ -560,6 +561,77 @@ func TestInitDeletesPreexistingStoppedManagedInstances(t *testing.T) {
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.NoError(t, err)
 	require.Empty(t, mock.vms)
+}
+
+func TestInitDeletesManagedInstancesOutsideStaticIPPool(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.vms[5000] = mockVM{
+		Node:     "node1",
+		VMID:     5000,
+		Name:     "runner-5000",
+		Pool:     "ci",
+		Tags:     "managed-by-fleeting-plugin-proxmox;fleeting-group-runner",
+		Status:   "running",
+		Storage:  "ceph-vm",
+		IPConfig: "ip=10.10.20.50/24,gw=10.10.20.1",
+		BootDisk: mock.template.BootDisk,
+		DiskDef:  mock.template.DiskDef,
+		MemoryMB: mock.template.MemoryMB,
+		CPUCores: mock.template.CPUCores,
+		DiskMB:   mock.template.DiskMB,
+	}
+	mock.vms[5001] = mockVM{
+		Node:     "node1",
+		VMID:     5001,
+		Name:     "runner-5001",
+		Pool:     "ci",
+		Tags:     "managed-by-fleeting-plugin-proxmox;fleeting-group-runner",
+		Status:   "running",
+		Storage:  "ceph-vm",
+		IPConfig: "ip=10.10.20.100/24,gw=10.10.20.1",
+		BootDisk: mock.template.BootDisk,
+		DiskDef:  mock.template.DiskDef,
+		MemoryMB: mock.template.MemoryMB,
+		CPUCores: mock.template.CPUCores,
+		DiskMB:   mock.template.DiskMB,
+	}
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node1"}
+	group.NetworkMode = "static"
+	group.IPPoolNetwork = "10.10.20.0/24"
+	group.IPPoolGateway = "10.10.20.1"
+	group.IPPoolRanges = LaxStringList{"10.10.20.100-10.10.20.101"}
+	group.StateFile = stateFile
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+
+	_, exists := mock.vms[5000]
+	require.False(t, exists)
+	remaining, exists := mock.vms[5001]
+	require.True(t, exists)
+	require.Equal(t, "running", remaining.Status)
+
+	snapshot, err := state.NewFileStore(stateFile).Read(context.Background())
+	require.NoError(t, err)
+	require.NotContains(t, snapshot.Leases, "10.10.20.50")
+	require.Equal(t, "node1/5001", snapshot.Leases["10.10.20.100"].Key)
 }
 
 func TestIncreaseReturnsAfterRequestsAreAccepted(t *testing.T) {

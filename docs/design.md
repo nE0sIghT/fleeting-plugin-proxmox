@@ -101,7 +101,7 @@ If a configured node becomes unavailable after successful `Init()`, runtime plac
 
 ## State model
 
-The plugin persists IP allocations in a local JSON state file protected by a lock file. By default the allocator state lives under `/var/lib/fleeting-plugin-proxmox` and is scoped by `cluster/pool/name_prefix`. Startup reconciliation rebuilds occupied leases from currently managed VMs and converts stale leases back into reusable entries after a cooldown period. Failed provisioning rollback removes allocator entries completely instead of leaving them behind as released leases.
+The plugin persists IP allocations in a local JSON state file protected by a lock file. By default the allocator state lives under `/var/lib/fleeting-plugin-proxmox` and is scoped by `cluster/pool/name_prefix`. Startup reconciliation rebuilds occupied leases from currently managed VMs and converts stale leases back into reusable entries after a cooldown period. Managed VMs with static addresses outside the currently configured pool are deleted during startup before lease reconciliation. Failed provisioning rollback removes allocator entries completely instead of leaving them behind as released leases.
 
 ## Security posture
 
