@@ -396,6 +396,7 @@ type SetConfigRequest struct {
 	MinMemoryMB        *int64
 	CPUCores           int
 	CIUser             string
+	CIPassword         string
 	SSHKeys            []string
 	NameServer         string
 	SearchDomain       string
@@ -595,12 +596,17 @@ func (c *Client) SetVMConfig(ctx context.Context, node string, vmid int, req Set
 	if req.CPUCores > 0 {
 		form.Set("cores", fmt.Sprintf("%d", req.CPUCores))
 	}
-	if req.CloudInitInterface == "" {
-		req.CloudInitInterface = "ipconfig0"
+	if req.IPConfig != "" {
+		if req.CloudInitInterface == "" {
+			req.CloudInitInterface = "ipconfig0"
+		}
+		form.Set(req.CloudInitInterface, req.IPConfig)
 	}
-	form.Set(req.CloudInitInterface, req.IPConfig)
 	if req.CIUser != "" {
 		form.Set("ciuser", req.CIUser)
+	}
+	if req.CIPassword != "" {
+		form.Set("cipassword", req.CIPassword)
 	}
 	if len(req.SSHKeys) > 0 {
 		keys := make([]string, 0, len(req.SSHKeys))
@@ -644,6 +650,14 @@ func (c *Client) StartVM(ctx context.Context, node string, vmid int) (string, er
 
 func (c *Client) StopVM(ctx context.Context, node string, vmid int) (string, error) {
 	return c.postString(ctx, path.Join("/nodes", node, "qemu", fmt.Sprintf("%d", vmid), "status", "stop"), nil)
+}
+
+func (c *Client) SuspendVM(ctx context.Context, node string, vmid int) (string, error) {
+	return c.postString(ctx, path.Join("/nodes", node, "qemu", fmt.Sprintf("%d", vmid), "status", "suspend"), nil)
+}
+
+func (c *Client) ResumeVM(ctx context.Context, node string, vmid int) (string, error) {
+	return c.postString(ctx, path.Join("/nodes", node, "qemu", fmt.Sprintf("%d", vmid), "status", "resume"), nil)
 }
 
 func (c *Client) ConvertVMToTemplate(ctx context.Context, node string, vmid int) (string, error) {
