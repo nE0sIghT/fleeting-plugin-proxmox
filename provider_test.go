@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -18,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
+	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/metrics"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/state"
 )
 
@@ -125,6 +127,45 @@ func TestIncreaseIgnoresNonPositiveDelta(t *testing.T) {
 	count, err = group.Increase(context.Background(), -1)
 	require.NoError(t, err)
 	require.Zero(t, count)
+}
+
+func TestConfigValidationFailureReportsInitProblem(t *testing.T) {
+	t.Parallel()
+
+	socketPath := filepath.Join(t.TempDir(), "metrics.sock")
+	listener, err := net.Listen("unix", socketPath)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = "https://pve.example:8006"
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node1"}
+	group.NetworkMode = "dhcp"
+	group.Scheduler = "invalid"
+	group.MetricsSocket = socketPath
+
+	_, err = group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.ErrorContains(t, err, "invalid scheduler")
+
+	require.NoError(t, listener.(*net.UnixListener).SetDeadline(time.Now().Add(time.Second)))
+	conn, err := listener.Accept()
+	require.NoError(t, err)
+	defer conn.Close()
+
+	var snapshot metrics.Snapshot
+	require.NoError(t, json.NewDecoder(conn).Decode(&snapshot))
+	require.False(t, snapshot.Up)
+	require.Len(t, snapshot.ProblemEvents, 1)
+	require.Equal(t, "init_failed", snapshot.ProblemEvents[0].Code)
+	require.Equal(t, metrics.ProblemActive, snapshot.ProblemEvents[0].State)
+	require.Contains(t, snapshot.ProblemEvents[0].Message, "invalid scheduler")
 }
 
 func (m *mockProxmox) handler(t *testing.T) http.Handler {
@@ -738,6 +779,37 @@ func TestCloneStorageCollisionQuarantinesPlacementAndUsesNextVMID(t *testing.T) 
 
 	mock := newMockProxmox()
 	mock.cloneCollisionVMIDs[5000] = true
+	metricsSocket := filepath.Join(t.TempDir(), "metrics.sock")
+	metricsListener, err := net.Listen("unix", metricsSocket)
+	require.NoError(t, err)
+
+	problemEvents := make(chan metrics.ProblemEvent, 10)
+	metricsDone := make(chan struct{})
+	go func() {
+		defer close(metricsDone)
+		for {
+			conn, acceptErr := metricsListener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			var snapshot metrics.Snapshot
+			decodeErr := json.NewDecoder(conn).Decode(&snapshot)
+			_ = conn.Close()
+			if decodeErr != nil {
+				continue
+			}
+			for _, event := range snapshot.ProblemEvents {
+				select {
+				case problemEvents <- event:
+				default:
+				}
+			}
+		}
+	}()
+	defer func() {
+		_ = metricsListener.Close()
+		<-metricsDone
+	}()
 
 	server := httptest.NewServer(mock.handler(t))
 	defer server.Close()
@@ -756,8 +828,10 @@ func TestCloneStorageCollisionQuarantinesPlacementAndUsesNextVMID(t *testing.T) 
 	group.NetworkMode = "dhcp"
 	group.CloneMode = "full"
 	group.TargetStorages = LaxStringList{"ceph-vm"}
+	group.MetricsSocket = metricsSocket
+	group.MetricsInterval = "10ms"
 
-	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	_, err = group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, group.Shutdown(context.Background()))
@@ -788,9 +862,21 @@ func TestCloneStorageCollisionQuarantinesPlacementAndUsesNextVMID(t *testing.T) 
 	}, 2*time.Second, 25*time.Millisecond)
 
 	mock.mu.Lock()
-	defer mock.mu.Unlock()
 	require.Equal(t, 1, mock.cloneAttempts[5000])
 	require.Equal(t, 1, mock.cloneAttempts[5001])
+	mock.mu.Unlock()
+
+	require.Eventually(t, func() bool {
+		select {
+		case event := <-problemEvents:
+			return event.Code == "clone_volume_collision" &&
+				event.State == metrics.ProblemActive &&
+				event.Node == "node1" &&
+				event.Storage == "ceph-vm"
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestTargetStoragePlacementIgnoresNodeRootFS(t *testing.T) {

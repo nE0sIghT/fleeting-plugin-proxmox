@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/metrics"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/proxmoxclient"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/scheduler"
 )
@@ -193,6 +194,28 @@ func TestOperationIDsAreUniqueAndDescribeOperation(t *testing.T) {
 	require.NotEqual(t, first, second)
 }
 
+func TestNodeAvailabilityProblemIsResolvedAfterRecovery(t *testing.T) {
+	t.Parallel()
+
+	recorder := &recordingProblemReporter{}
+	group := &Group{
+		problems:         recorder,
+		unavailableNodes: map[string]bool{},
+	}
+
+	group.markNodeUnavailable("pve01", errors.New("connection refused"))
+	group.markNodeUnavailable("pve01", errors.New("connection refused"))
+	group.clearNodeUnavailable("pve01")
+	group.clearNodeUnavailable("pve01")
+
+	require.Len(t, recorder.events, 3)
+	require.Equal(t, metrics.ProblemActive, recorder.events[0].State)
+	require.Equal(t, metrics.ProblemActive, recorder.events[1].State)
+	require.Equal(t, metrics.ProblemResolved, recorder.events[2].State)
+	require.Equal(t, "node_unavailable", recorder.events[0].Code)
+	require.Equal(t, "pve01", recorder.events[0].Node)
+}
+
 func TestApplyAllocatedResourcesCountsRunningVMs(t *testing.T) {
 	t.Parallel()
 
@@ -361,4 +384,12 @@ func TestAllocateManagedTemplateVMIDSkipsUsedVMIDs(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, 510002, vmid)
+}
+
+type recordingProblemReporter struct {
+	events []metrics.ProblemEvent
+}
+
+func (r *recordingProblemReporter) ReportProblem(event metrics.ProblemEvent) {
+	r.events = append(r.events, event)
 }

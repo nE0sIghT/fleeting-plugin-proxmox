@@ -84,6 +84,35 @@ func TestRenderPrometheusStaleSnapshotSuppressesResourceGauges(t *testing.T) {
 	require.NotContains(t, text, `node="pve01"`)
 }
 
+func TestRenderProblemPrometheus(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	renderProblemPrometheus(&out, ProblemStatus{
+		Problems: []ProblemView{
+			{
+				State:        ProblemActive,
+				Cluster:      "prod",
+				Pool:         "ci",
+				Group:        "arm64",
+				Code:         "clone_failed",
+				Phase:        "clone",
+				Node:         "pve01",
+				Storage:      "nvme0",
+				Occurrences:  17,
+				LastSeenUnix: 100,
+			},
+		},
+	})
+
+	text := out.String()
+	labels := `cluster="prod",pool="ci",group="arm64",code="clone_failed",phase="clone",node="pve01",storage="nvme0"`
+	require.Contains(t, text, `fleeting_proxmox_problem_active{`+labels+`} 1`)
+	require.Contains(t, text, `fleeting_proxmox_problem_recent{`+labels+`} 0`)
+	require.Contains(t, text, `fleeting_proxmox_problem_occurrences{`+labels+`} 17`)
+	require.Contains(t, text, `fleeting_proxmox_problem_last_seen_timestamp_seconds{`+labels+`} 100`)
+}
+
 func TestEscapeLabelValue(t *testing.T) {
 	t.Parallel()
 

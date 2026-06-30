@@ -82,6 +82,8 @@ Optional CPU and memory allocation limits add a second check against committed V
 
 Each plugin process can publish a periodic JSON metrics snapshot to a local Unix socket. A separate `metrics-exporter` mode in the same binary listens on that socket, keeps the latest snapshot per `cluster/pool/name_prefix`, and exposes one Prometheus `/metrics` endpoint. This avoids port conflicts when GitLab Runner starts multiple plugin processes on the same host. Plugin reporters retry while the socket is absent and reconnect after exporter restarts.
 
+The same IPC stream carries bounded, coalesced problem events. The exporter groups them by stable fleet and operation scope, maintains active/recent lifecycle state, publishes problem metrics and HTTP summaries, and atomically writes a human-readable exceptions file. Dynamic values such as VMID and raw error text are retained only as the latest diagnostic sample and never become Prometheus labels.
+
 For `clone_mode = "auto"`, linked clones are used only when all of the following are true:
 
 - the template is local to the selected node

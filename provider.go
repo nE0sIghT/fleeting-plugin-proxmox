@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 	"golang.org/x/crypto/ssh"
@@ -43,8 +45,10 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	g.settings = settings
 
 	if err := g.config().validate(g.settings); err != nil {
-		return provider.ProviderInfo{}, err
+		g.configureMetricsReporter(metrics.DefaultReporterInterval)
+		return g.failInit(err)
 	}
+	g.configureMetricsReporter(g.parsedMetricsInterval)
 
 	if g.settings.Protocol == "" {
 		g.settings.Protocol = provider.ProtocolSSH
@@ -55,7 +59,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 
 	publicKey, err := g.prepareSSHCredentials()
 	if err != nil {
-		return provider.ProviderInfo{}, err
+		return g.failInit(err)
 	}
 
 	g.client, err = proxmoxclient.New(proxmoxclient.Config{
@@ -67,7 +71,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		AllowedServerNames: []string(g.Nodes),
 	})
 	if err != nil {
-		return provider.ProviderInfo{}, err
+		return g.failInit(err)
 	}
 
 	var pool *ippool.Pool
@@ -81,8 +85,13 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 			ReuseCooldown: g.parsedIPReuseCooldown,
 		}, store)
 		if err != nil {
-			return provider.ProviderInfo{}, err
+			return g.failInit(err)
 		}
+	}
+
+	var problemReporter metrics.ProblemReporter
+	if g.metricsReporter != nil {
+		problemReporter = g.metricsReporter
 	}
 
 	g.group = instancegroup.New(
@@ -140,23 +149,17 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		limiter.New(g.MaxParallelClones),
 		limiter.New(g.MaxParallelStarts),
 		limiter.New(g.MaxParallelDeletes),
+		problemReporter,
 	)
 
 	if err := g.group.Init(ctx); err != nil {
-		return provider.ProviderInfo{}, err
+		return g.failInit(err)
 	}
-	if g.MetricsSocket != "" {
-		g.metricsReporter = metrics.NewReporter(metrics.ReporterConfig{
-			SocketPath: g.MetricsSocket,
-			Interval:   g.parsedMetricsInterval,
-			Identity: metrics.Identity{
-				Cluster: g.ClusterName,
-				Pool:    g.Pool,
-				Group:   g.NamePrefix,
-			},
-			Collect: g.group.MetricsSnapshot,
-			Info:    g.log.Info,
-			Warn:    g.log.Warn,
+	if g.metricsReporter != nil {
+		g.metricsReporter.ReportProblem(metrics.ProblemEvent{
+			Code:  "init_failed",
+			State: metrics.ProblemResolved,
+			Phase: "init",
 		})
 		g.metricsReporter.Start()
 	}
@@ -169,9 +172,62 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	}, nil
 }
 
+func (g *InstanceGroup) configureMetricsReporter(interval time.Duration) {
+	if g.MetricsSocket == "" {
+		return
+	}
+	g.metricsReporter = metrics.NewReporter(metrics.ReporterConfig{
+		SocketPath: g.MetricsSocket,
+		Interval:   interval,
+		Identity: metrics.Identity{
+			Cluster: g.ClusterName,
+			Pool:    g.Pool,
+			Group:   g.NamePrefix,
+		},
+		Collect: func(ctx context.Context) (metrics.Snapshot, error) {
+			return g.group.MetricsSnapshot(ctx)
+		},
+		Info: g.log.Info,
+		Warn: g.log.Warn,
+	})
+}
+
+func (g *InstanceGroup) failInit(err error) (provider.ProviderInfo, error) {
+	if g.metricsReporter != nil {
+		reporter := g.metricsReporter
+		reporter.ReportProblem(metrics.ProblemEvent{
+			Code:     "init_failed",
+			State:    metrics.ProblemActive,
+			Severity: "error",
+			Phase:    "init",
+			Message:  err.Error(),
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		reporter.FlushProblems(ctx, false)
+		cancel()
+		g.metricsReporter = nil
+	}
+	return provider.ProviderInfo{}, err
+}
+
+func (g *InstanceGroup) reportRuntimeProblem(code, phase, instance string, err error) {
+	if g.metricsReporter == nil || err == nil || errors.Is(err, context.Canceled) {
+		return
+	}
+	g.metricsReporter.ReportProblem(metrics.ProblemEvent{
+		Code:     code,
+		State:    metrics.ProblemRecent,
+		Severity: "error",
+		Phase:    phase,
+		Instance: instance,
+		Message:  err.Error(),
+	})
+}
+
 func (g *InstanceGroup) Update(ctx context.Context, update func(instance string, state provider.State)) error {
 	instances, err := g.group.List(ctx)
 	if err != nil {
+		g.reportRuntimeProblem("reconcile_failed", "reconcile", "", err)
 		return err
 	}
 	for _, instance := range instances {
@@ -195,6 +251,7 @@ func (g *InstanceGroup) Decrease(ctx context.Context, instances []string) ([]str
 func (g *InstanceGroup) ConnectInfo(ctx context.Context, instance string) (provider.ConnectInfo, error) {
 	info, err := g.group.ConnectInfo(ctx, instance, g.settings)
 	if err != nil {
+		g.reportRuntimeProblem("connect_info_failed", "connect", instance, err)
 		return provider.ConnectInfo{}, err
 	}
 	info.Key = g.settings.Key
@@ -202,18 +259,23 @@ func (g *InstanceGroup) ConnectInfo(ctx context.Context, instance string) (provi
 }
 
 func (g *InstanceGroup) Heartbeat(ctx context.Context, instance string) error {
-	return g.group.Heartbeat(ctx, instance)
+	err := g.group.Heartbeat(ctx, instance)
+	if err != nil {
+		g.reportRuntimeProblem("heartbeat_failed", "heartbeat", instance, err)
+	}
+	return err
 }
 
 func (g *InstanceGroup) Shutdown(ctx context.Context) error {
+	var groupErr error
+	if g.group != nil {
+		groupErr = g.group.Shutdown(ctx)
+	}
 	if g.metricsReporter != nil {
 		g.metricsReporter.Shutdown(ctx)
 		g.metricsReporter = nil
 	}
-	if g.group == nil {
-		return nil
-	}
-	return g.group.Shutdown(ctx)
+	return groupErr
 }
 
 func (g *InstanceGroup) prepareSSHCredentials() (string, error) {

@@ -18,23 +18,32 @@ const (
 	DefaultExporterListenAddress = "127.0.0.1:9252"
 	DefaultExporterSocketPath    = "/run/fleeting-plugin-proxmox/metrics.sock"
 	DefaultExporterMetricsPath   = "/metrics"
+	DefaultExceptionsFile        = "/run/fleeting-plugin-proxmox/exceptions"
 	DefaultExporterStaleAfter    = time.Minute
+	DefaultProblemRetention      = 24 * time.Hour
+	DefaultProblemLimit          = 100
 	DefaultSocketMode            = 0o660
 )
 
 type ExporterConfig struct {
-	ListenAddress string
-	SocketPath    string
-	MetricsPath   string
-	StaleAfter    time.Duration
-	SocketMode    os.FileMode
+	ListenAddress    string
+	SocketPath       string
+	MetricsPath      string
+	StaleAfter       time.Duration
+	SocketMode       os.FileMode
+	ExceptionsFile   string
+	ProblemRetention time.Duration
+	ProblemLimit     int
 }
 
 type Exporter struct {
 	cfg ExporterConfig
 
-	mu        sync.Mutex
-	snapshots map[string]storedSnapshot
+	mu                sync.Mutex
+	fileMu            sync.Mutex
+	snapshots         map[string]storedSnapshot
+	problems          map[string]storedProblem
+	seenProblemEvents map[string]int64
 }
 
 func RunExporter(ctx context.Context, cfg ExporterConfig) error {
@@ -55,12 +64,23 @@ func NewExporter(cfg ExporterConfig) *Exporter {
 	if cfg.StaleAfter == 0 {
 		cfg.StaleAfter = DefaultExporterStaleAfter
 	}
+	if cfg.ExceptionsFile == "" {
+		cfg.ExceptionsFile = DefaultExceptionsFile
+	}
+	if cfg.ProblemRetention == 0 {
+		cfg.ProblemRetention = DefaultProblemRetention
+	}
+	if cfg.ProblemLimit <= 0 {
+		cfg.ProblemLimit = DefaultProblemLimit
+	}
 	if cfg.SocketMode == 0 {
 		cfg.SocketMode = DefaultSocketMode
 	}
 	return &Exporter{
-		cfg:       cfg,
-		snapshots: map[string]storedSnapshot{},
+		cfg:               cfg,
+		snapshots:         map[string]storedSnapshot{},
+		problems:          map[string]storedProblem{},
+		seenProblemEvents: map[string]int64{},
 	}
 }
 
@@ -73,9 +93,14 @@ func (e *Exporter) Run(ctx context.Context) error {
 		_ = listener.Close()
 		_ = os.Remove(e.cfg.SocketPath)
 	}()
+	if err := e.refreshExceptionsFile(time.Now()); err != nil {
+		return err
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(e.cfg.MetricsPath, e.handleMetrics)
+	mux.HandleFunc("/problems", e.handleProblems)
+	mux.HandleFunc("/problems.json", e.handleProblemsJSON)
 	server := &http.Server{
 		Addr:              e.cfg.ListenAddress,
 		Handler:           mux,
@@ -93,20 +118,29 @@ func (e *Exporter) Run(ctx context.Context) error {
 		}
 		errs <- err
 	}()
+	shutdown := func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = listener.Close()
+		_ = server.Shutdown(shutdownCtx)
+	}
 
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = listener.Close()
-		_ = server.Shutdown(shutdownCtx)
-		return nil
-	case err := <-errs:
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = listener.Close()
-		_ = server.Shutdown(shutdownCtx)
-		return err
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			shutdown()
+			return nil
+		case err := <-errs:
+			shutdown()
+			return err
+		case now := <-ticker.C:
+			if err := e.refreshExceptionsFile(now); err != nil {
+				shutdown()
+				return err
+			}
+		}
 	}
 }
 
@@ -165,13 +199,19 @@ func (e *Exporter) handleUnixConn(conn net.Conn) {
 	if snapshot.TimestampUnix == 0 {
 		snapshot.TimestampUnix = time.Now().Unix()
 	}
+	receivedAt := time.Now()
+	events := snapshot.ProblemEvents
+	snapshot.ProblemEvents = nil
 
 	e.mu.Lock()
 	e.snapshots[snapshot.Identity.Key()] = storedSnapshot{
 		Snapshot:     snapshot,
-		ReceivedUnix: time.Now().Unix(),
+		ReceivedUnix: receivedAt.Unix(),
 	}
+	e.applyProblemEventsLocked(snapshot.Identity, events, receivedAt)
 	e.mu.Unlock()
+
+	_ = e.refreshExceptionsFile(receivedAt)
 }
 
 func (e *Exporter) handleMetrics(w http.ResponseWriter, _ *http.Request) {
@@ -184,5 +224,24 @@ func (e *Exporter) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	}
 	e.mu.Unlock()
 
-	renderPrometheus(w, snapshots, time.Now(), e.cfg.StaleAfter)
+	now := time.Now()
+	renderPrometheus(w, snapshots, now, e.cfg.StaleAfter)
+	renderProblemPrometheus(w, e.problemStatus(now))
+}
+
+func (e *Exporter) handleProblems(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	status := limitProblemStatus(e.problemStatus(time.Now()), e.cfg.ProblemLimit)
+	_, _ = w.Write(renderProblemText(status))
+}
+
+func (e *Exporter) handleProblemsJSON(w http.ResponseWriter, _ *http.Request) {
+	status := limitProblemStatus(e.problemStatus(time.Now()), e.cfg.ProblemLimit)
+	data, err := renderProblemJSON(status)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }

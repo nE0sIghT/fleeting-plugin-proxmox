@@ -103,6 +103,29 @@ func renderPrometheus(w io.Writer, snapshots []storedSnapshot, now time.Time, st
 	}
 }
 
+func renderProblemPrometheus(w io.Writer, status ProblemStatus) {
+	writeMetricHeader(w, "fleeting_proxmox_problem_active", "Whether a grouped plugin problem is currently active.", "gauge")
+	writeMetricHeader(w, "fleeting_proxmox_problem_recent", "Whether a grouped plugin problem occurred within the configured retention period.", "gauge")
+	writeMetricHeader(w, "fleeting_proxmox_problem_occurrences", "Number of occurrences aggregated for a plugin problem within the exporter retention period.", "gauge")
+	writeMetricHeader(w, "fleeting_proxmox_problem_last_seen_timestamp_seconds", "Unix timestamp of the last occurrence of a grouped plugin problem.", "gauge")
+
+	for _, problem := range status.Problems {
+		labels := []label{
+			{name: "cluster", value: problem.Cluster},
+			{name: "pool", value: problem.Pool},
+			{name: "group", value: problem.Group},
+			{name: "code", value: problem.Code},
+			{name: "phase", value: problem.Phase},
+			{name: "node", value: problem.Node},
+			{name: "storage", value: problem.Storage},
+		}
+		writeSample(w, "fleeting_proxmox_problem_active", labels, boolValue(problem.State == ProblemActive))
+		writeSample(w, "fleeting_proxmox_problem_recent", labels, boolValue(problem.State == ProblemRecent))
+		writeSample(w, "fleeting_proxmox_problem_occurrences", labels, float64(problem.Occurrences))
+		writeSample(w, "fleeting_proxmox_problem_last_seen_timestamp_seconds", labels, float64(problem.LastSeenUnix))
+	}
+}
+
 func writeMetricHeader(w io.Writer, name, help, typ string) {
 	fmt.Fprintf(w, "# HELP %s %s\n", name, help)
 	fmt.Fprintf(w, "# TYPE %s %s\n", name, typ)

@@ -290,6 +290,29 @@ The reporter does not fail plugin initialization when the socket is missing. It 
 
 An example systemd service is provided at [`examples/fleeting-plugin-proxmox-metrics-exporter.service`](/workspace/fleeting-plugin-proxmox/examples/fleeting-plugin-proxmox-metrics-exporter.service).
 
+The exporter also aggregates operational problems from every plugin process using the same socket. A human-readable summary is written atomically to:
+
+```text
+/run/fleeting-plugin-proxmox/exceptions
+```
+
+Check it directly:
+
+```shell
+cat /run/fleeting-plugin-proxmox/exceptions
+curl http://127.0.0.1:9252/problems
+curl http://127.0.0.1:9252/problems.json
+```
+
+The summary status is:
+
+- `UNKNOWN` until the exporter receives its first fleet snapshot
+- `OK` when reporters are current and no retained problems exist
+- `DEGRADED` when recent or resolved errors remain within the retention window
+- `ERROR` when an active problem exists or a reporter is stale/offline
+
+Repeated failures are grouped by fleet, code, phase, node, and storage. VMID, operation ID, and the latest error remain diagnostic fields and do not create a separate problem for every failed VM. Recent and resolved problems are retained for 24 hours by default. Exporter flags `--problem-retention`, `--problem-limit`, and `--exceptions-file` control this behavior.
+
 Prometheus can scrape the exporter directly:
 
 ```yaml
@@ -301,6 +324,33 @@ scrape_configs:
 ```
 
 All plugin metrics include `cluster`, `pool`, and `group` labels. Per-node metrics also include `node`; storage metrics include `storage`.
+
+Problem metrics use stable `code`, `phase`, `node`, and `storage` labels:
+
+```text
+fleeting_proxmox_problem_active
+fleeting_proxmox_problem_recent
+fleeting_proxmox_problem_occurrences
+fleeting_proxmox_problem_last_seen_timestamp_seconds
+```
+
+Error text is deliberately excluded from Prometheus labels.
+
+### Log correlation
+
+Plugin log records use the same full group ID as taskscaler:
+
+```text
+group=proxmox/<cluster>/<pool>/<name_prefix>
+```
+
+Filter one fleet:
+
+```shell
+journalctl -u gitlab-runner --grep='group=proxmox/cluster-pve01/gitlab-runners1/amd64-runner1'
+```
+
+Each `Increase` and `Decrease` batch has an `operation_id`. VM operations also include `instance`, `node`, `storage`, `vmid`, and `phase`. Durations are rendered as human-readable values such as `45ms`, `2.042s`, or `3m1.2s`.
 
 ## Runner Configuration
 

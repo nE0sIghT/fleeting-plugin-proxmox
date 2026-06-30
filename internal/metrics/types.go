@@ -1,5 +1,7 @@
 package metrics
 
+import "strings"
+
 type Identity struct {
 	Cluster string `json:"cluster"`
 	Pool    string `json:"pool"`
@@ -17,6 +19,39 @@ type Snapshot struct {
 	PendingInstances  int               `json:"pending_instances"`
 	Nodes             []NodeSnapshot    `json:"nodes,omitempty"`
 	Storages          []StorageSnapshot `json:"storages,omitempty"`
+	ProblemEvents     []ProblemEvent    `json:"problem_events,omitempty"`
+}
+
+type ProblemState string
+
+const (
+	ProblemActive   ProblemState = "active"
+	ProblemRecent   ProblemState = "recent"
+	ProblemResolved ProblemState = "resolved"
+)
+
+type ProblemEvent struct {
+	ID              string       `json:"id"`
+	Code            string       `json:"code"`
+	State           ProblemState `json:"state"`
+	Severity        string       `json:"severity,omitempty"`
+	Phase           string       `json:"phase,omitempty"`
+	Node            string       `json:"node,omitempty"`
+	Storage         string       `json:"storage,omitempty"`
+	Instance        string       `json:"instance,omitempty"`
+	OperationID     string       `json:"operation_id,omitempty"`
+	Message         string       `json:"message,omitempty"`
+	TimestampUnix   int64        `json:"timestamp_unix"`
+	ActiveUntilUnix int64        `json:"active_until_unix,omitempty"`
+	Occurrences     uint64       `json:"occurrences,omitempty"`
+}
+
+type ProblemReporter interface {
+	ReportProblem(ProblemEvent)
+}
+
+func (p ProblemEvent) Key() string {
+	return strings.Join([]string{p.Code, p.Phase, p.Node, p.Storage}, "\x00")
 }
 
 type NodeSnapshot struct {
