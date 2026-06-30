@@ -174,6 +174,25 @@ func TestCloneVolumeCollisionDetection(t *testing.T) {
 	require.False(t, isCloneVolumeCollision(errors.New("clone failed: connection reset"), 520002))
 }
 
+func TestFormatDurationIsHumanReadable(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "45ms", formatDuration(44*time.Millisecond+600*time.Microsecond))
+	require.Equal(t, "2.042s", formatDuration(2*time.Second+42*time.Millisecond+134*time.Microsecond))
+	require.Equal(t, "3m1.2s", formatDuration(3*time.Minute+1200*time.Millisecond))
+}
+
+func TestOperationIDsAreUniqueAndDescribeOperation(t *testing.T) {
+	t.Parallel()
+
+	group := &Group{}
+	first := group.nextOperationID("inc")
+	second := group.nextOperationID("inc")
+
+	require.Regexp(t, `^inc-[0-9a-f]+-[0-9a-f]+$`, first)
+	require.NotEqual(t, first, second)
+}
+
 func TestApplyAllocatedResourcesCountsRunningVMs(t *testing.T) {
 	t.Parallel()
 

@@ -38,7 +38,8 @@ type InstanceGroup struct {
 }
 
 func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings provider.Settings) (provider.ProviderInfo, error) {
-	g.log = log.With("cluster", g.ClusterName, "pool", g.Pool)
+	groupID := path.Join("proxmox", g.ClusterName, g.Pool, g.NamePrefix)
+	g.log = log.With("group", groupID, "cluster", g.ClusterName, "pool", g.Pool)
 	g.settings = settings
 
 	if err := g.config().validate(g.settings); err != nil {
@@ -161,7 +162,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	}
 
 	return provider.ProviderInfo{
-		ID:        path.Join("proxmox", g.ClusterName, g.Pool, g.NamePrefix),
+		ID:        groupID,
 		MaxSize:   g.parsedVMIDRange.Max - g.parsedVMIDRange.Min + 1,
 		Version:   Version.String(),
 		BuildInfo: Version.BuildInfo(),

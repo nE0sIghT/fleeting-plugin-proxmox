@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/template"
 	"time"
 
@@ -84,6 +85,7 @@ type Group struct {
 	runCtx        context.Context
 	cancelRun     context.CancelFunc
 	provisionWg   sync.WaitGroup
+	operationSeq  atomic.Uint64
 
 	mu sync.Mutex
 	// transient overrides smooth out state transitions while long-running Proxmox tasks complete.
@@ -123,6 +125,7 @@ type clonePlacementKey struct {
 }
 
 type provisionPlan struct {
+	OperationID     string
 	TemplateNode    string
 	TemplateVMID    int
 	TemplateStorage string
@@ -314,7 +317,7 @@ func (g *Group) cleanupPreexistingStopped(ctx context.Context, resources []proxm
 			State: provider.StateDeleting,
 		}
 
-		g.log.Warn("deleting preexisting stopped instance", "instance", instance.ID, "status", resource.Status)
+		g.log.Warn("deleting preexisting stopped instance", "phase", "cleanup", "instance", instance.ID, "status", resource.Status)
 		if err := g.safeDestroyManagedVM(ctx, instance); err != nil {
 			return fmt.Errorf("delete preexisting stopped instance %s: %w", instance.ID, err)
 		}
@@ -340,7 +343,7 @@ func (g *Group) cleanupManagedOutsideIPPool(ctx context.Context, instances []Man
 			continue
 		}
 
-		g.log.Warn("deleting managed instance outside static IP pool", "instance", instance.ID, "ip", instance.IP.String())
+		g.log.Warn("deleting managed instance outside static IP pool", "phase", "cleanup", "instance", instance.ID, "ip", instance.IP.String())
 		if err := g.ensureVMStopped(ctx, instance.Node, instance.VMID); err != nil {
 			return nil, fmt.Errorf("stop managed instance %s outside static IP pool: %w", instance.ID, err)
 		}
@@ -518,7 +521,7 @@ func (g *Group) stageTemplates(ctx context.Context, templates []proxmoxclient.Cl
 		if _, keep := keepTemplates[existing.ID]; keep {
 			continue
 		}
-		g.log.Warn("deleting preexisting managed template", "template", existing.ID)
+		g.log.Warn("deleting preexisting managed template", "phase", "template-stage", "template", existing.ID)
 		if err := g.destroyManagedTemplate(ctx, existing.ManagedTemplate, existing.AllowPartialDelete); err != nil {
 			return nil, fmt.Errorf("delete managed template %s: %w", existing.ID, err)
 		}
@@ -589,7 +592,7 @@ func (g *Group) createManagedTemplate(ctx context.Context, source proxmoxclient.
 		targetStorage = ""
 	}
 
-	g.log.Info("staging managed template", "template", staged.ID, "source_vmid", source.VMID, "source_node", source.Node, "storage", staged.Storage, "clone_mode", mode)
+	g.log.Info("staging managed template", "phase", "template-stage", "template", staged.ID, "source_vmid", source.VMID, "source_node", source.Node, "storage", staged.Storage, "clone_mode", mode)
 
 	cloneCtx, cancel := context.WithTimeout(ctx, g.cfg.CloneTimeout)
 	defer cancel()
@@ -641,7 +644,7 @@ func (g *Group) createManagedTemplate(ctx context.Context, source proxmoxclient.
 }
 
 func (g *Group) createManagedTemplateViaMigration(ctx context.Context, source proxmoxclient.ClusterResource, staged ManagedTemplate, sourceVersion string) error {
-	g.log.Info("staging managed template via migration", "template", staged.ID, "source_vmid", source.VMID, "source_node", source.Node, "storage", staged.Storage, "clone_mode", "full")
+	g.log.Info("staging managed template via migration", "phase", "template-stage", "template", staged.ID, "source_vmid", source.VMID, "source_node", source.Node, "storage", staged.Storage, "clone_mode", "full")
 
 	cloneCtx, cancel := context.WithTimeout(ctx, g.cfg.CloneTimeout)
 	defer cancel()
@@ -734,7 +737,7 @@ func (g *Group) cleanupFailedManagedTemplate(template ManagedTemplate, extraNode
 		nodeTemplate.Node = node
 		nodeTemplate.ID = instanceID(node, template.VMID)
 		if err := g.destroyManagedTemplate(cleanupCtx, nodeTemplate, true); err != nil {
-			g.log.Warn("failed to clean up staged template after error", "template", nodeTemplate.ID, "error", err)
+			g.log.Warn("failed to clean up staged template after error", "phase", "template-stage", "template", nodeTemplate.ID, "error", err)
 		}
 	}
 }
@@ -1017,8 +1020,16 @@ func (g *Group) Increase(ctx context.Context, delta int) ([]string, error) {
 		return nil, nil
 	}
 
-	plans, planErr := g.planIncrease(ctx, delta)
+	operationID := g.nextOperationID("inc")
+	log := g.log.With("operation_id", operationID, "operation", "increase")
+	started := time.Now()
+	log.Info("increase started", "requested", delta)
+
+	plans, planErr := g.planIncrease(ctx, delta, operationID)
 	if len(plans) == 0 {
+		if planErr != nil {
+			log.Error("increase failed", "duration", humanDuration(started), "error", planErr)
+		}
 		return nil, planErr
 	}
 
@@ -1033,14 +1044,22 @@ func (g *Group) Increase(ctx context.Context, delta int) ([]string, error) {
 
 			if _, err := g.provisionOne(g.runCtx, plan); err != nil {
 				g.failAcceptedProvision(plan)
-				g.log.Error("provisioning failed", "instance", id, "error", err)
+				g.log.Error(
+					"provisioning failed",
+					"operation_id", plan.OperationID,
+					"operation", "increase",
+					"phase", "provision",
+					"instance", id,
+					"error", err,
+				)
 			}
 		}(plan, id)
 	}
 
 	if planErr != nil {
-		g.log.Warn("provisioning partially requested", "requested", delta, "accepted", len(plans), "error", planErr)
+		log.Warn("provisioning partially requested", "requested", delta, "accepted", len(plans), "error", planErr)
 	}
+	log.Info("increase accepted", "duration", humanDuration(started), "requested", delta, "accepted", len(plans))
 
 	return plannedIDs(plans), nil
 }
@@ -1050,6 +1069,11 @@ func (g *Group) Decrease(ctx context.Context, ids []string) ([]string, error) {
 		id  string
 		err error
 	}
+
+	operationID := g.nextOperationID("dec")
+	log := g.log.With("operation_id", operationID, "operation", "decrease")
+	started := time.Now()
+	log.Info("decrease started", "requested", len(ids))
 
 	workerCount := g.deleteLimiter.Capacity()
 	if workerCount <= 0 {
@@ -1066,7 +1090,7 @@ func (g *Group) Decrease(ctx context.Context, ids []string) ([]string, error) {
 			defer wg.Done()
 			for id := range jobs {
 				err := g.deleteLimiter.Do(ctx, func(ctx context.Context) error {
-					return g.deleteOne(ctx, id)
+					return g.deleteOne(ctx, id, operationID)
 				})
 				results <- result{id: id, err: err}
 			}
@@ -1084,12 +1108,14 @@ func (g *Group) Decrease(ctx context.Context, ids []string) ([]string, error) {
 	var errs []error
 	for res := range results {
 		if res.err != nil {
+			log.Error("deletion failed", "phase", "delete", "instance", res.id, "error", res.err)
 			errs = append(errs, res.err)
 			continue
 		}
 		deleted = append(deleted, res.id)
 	}
 
+	log.Info("decrease completed", "duration", humanDuration(started), "requested", len(ids), "deleted", len(deleted), "failed", len(errs))
 	return deleted, errors.Join(errs...)
 }
 
@@ -1210,7 +1236,7 @@ func (g *Group) Get(ctx context.Context, id string) (ManagedInstance, error) {
 	return instance, nil
 }
 
-func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, error) {
+func (g *Group) planIncrease(ctx context.Context, delta int, operationID string) ([]provisionPlan, error) {
 	vmResources, err := g.client.ListClusterResources(ctx, "vm")
 	if err != nil {
 		return nil, err
@@ -1293,6 +1319,7 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 		}
 
 		plans = append(plans, provisionPlan{
+			OperationID:     operationID,
 			TemplateNode:    targetNode.TemplateNode,
 			TemplateVMID:    targetNode.TemplateVMID,
 			TemplateStorage: stateTemplateStorage(states, targetNode.Name),
@@ -1307,7 +1334,13 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 	if len(plans) < delta && lastPlacementErr != nil {
 		var placementErr *scheduler.PlacementError
 		if errors.As(lastPlacementErr, &placementErr) && len(placementErr.Reasons) > 0 {
-			g.log.Warn("placement rejected", "reasons", strings.Join(placementErr.Reasons, "; "))
+			g.log.Warn(
+				"placement rejected",
+				"operation_id", operationID,
+				"operation", "increase",
+				"phase", "placement",
+				"reasons", strings.Join(placementErr.Reasons, "; "),
+			)
 		}
 		errs = append(errs, lastPlacementErr)
 	}
@@ -1321,7 +1354,14 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 	id := instanceID(plan.Node, plan.VMID)
 	var lease ippool.Lease
 	var err error
-	log := g.log.With("instance", id, "node", plan.Node, "vmid", plan.VMID, "storage", plan.TargetStorage)
+	log := g.log.With(
+		"operation_id", plan.OperationID,
+		"operation", "increase",
+		"instance", id,
+		"node", plan.Node,
+		"vmid", plan.VMID,
+		"storage", plan.TargetStorage,
+	)
 	if g.cfg.NetworkMode == "static" {
 		if g.pool == nil {
 			return "", fmt.Errorf("static network mode requires ip pool")
@@ -1350,10 +1390,10 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 	cloneCtx, cancel := context.WithTimeout(ctx, g.cfg.CloneTimeout)
 	defer cancel()
 
-	log.Info("provisioning started")
+	log.Info("provisioning started", "phase", "provision")
 	cloneStart := time.Now()
 	err = g.cloneLimiter.Do(cloneCtx, func(ctx context.Context) error {
-		log.Info("clone started")
+		log.Info("clone started", "phase", "clone")
 		effectiveMode := g.effectiveCloneMode(plan)
 		targetStorage := plan.TargetStorage
 		fullClone := effectiveMode == "full"
@@ -1375,13 +1415,13 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 		return g.client.WaitForTask(ctx, plan.TemplateNode, upid, g.cfg.TaskPollInterval)
 	})
 	if err != nil {
-		log.Error("clone failed", "duration", time.Since(cloneStart), "error", err)
+		log.Error("clone failed", "phase", "clone", "duration", humanDuration(cloneStart), "error", err)
 		g.quarantineClonePlacement(plan, err)
 		rollback()
 		return "", err
 	}
 	g.clearClonePlacementQuarantine(plan)
-	log.Info("clone completed", "duration", time.Since(cloneStart))
+	log.Info("clone completed", "phase", "clone", "duration", humanDuration(cloneStart))
 
 	description, err := g.renderDescription(plan.Node, plan.VMID, lease.IP)
 	if err != nil {
@@ -1400,7 +1440,7 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 	}
 
 	configStart := time.Now()
-	log.Info("config started")
+	log.Info("config started", "phase", "config")
 	upid, err := g.client.SetVMConfig(cloneCtx, plan.Node, plan.VMID, proxmoxclient.SetConfigRequest{
 		CloudInitInterface: g.cfg.CloudInitInterface,
 		Tags:               g.cfg.MandatoryTags,
@@ -1416,32 +1456,32 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 		DisableCIUpgrade:   true,
 	})
 	if err != nil {
-		log.Error("config failed", "duration", time.Since(configStart), "error", err)
+		log.Error("config failed", "phase", "config", "duration", humanDuration(configStart), "error", err)
 		rollback()
 		return "", err
 	}
 	if err := g.client.WaitForTask(cloneCtx, plan.Node, upid, g.cfg.TaskPollInterval); err != nil {
-		log.Error("config wait failed", "duration", time.Since(configStart), "error", err)
+		log.Error("config wait failed", "phase", "config", "duration", humanDuration(configStart), "error", err)
 		rollback()
 		return "", err
 	}
-	log.Info("config completed", "duration", time.Since(configStart))
+	log.Info("config completed", "phase", "config", "duration", humanDuration(configStart))
 
 	if g.cfg.VMDiskMB > 0 {
 		resizeStart := time.Now()
-		log.Info("resize started", "disk_device", g.templateDisk, "disk_mb", g.cfg.VMDiskMB)
+		log.Info("resize started", "phase", "resize", "disk_device", g.templateDisk, "disk_mb", g.cfg.VMDiskMB)
 		upid, err = g.client.ResizeVMDisk(cloneCtx, plan.Node, plan.VMID, g.templateDisk, g.cfg.VMDiskMB)
 		if err != nil {
-			log.Error("resize failed", "duration", time.Since(resizeStart), "error", err)
+			log.Error("resize failed", "phase", "resize", "duration", humanDuration(resizeStart), "error", err)
 			rollback()
 			return "", err
 		}
 		if err := g.client.WaitForTask(cloneCtx, plan.Node, upid, g.cfg.TaskPollInterval); err != nil {
-			log.Error("resize wait failed", "duration", time.Since(resizeStart), "error", err)
+			log.Error("resize wait failed", "phase", "resize", "duration", humanDuration(resizeStart), "error", err)
 			rollback()
 			return "", err
 		}
-		log.Info("resize completed", "duration", time.Since(resizeStart))
+		log.Info("resize completed", "phase", "resize", "duration", humanDuration(resizeStart))
 	}
 
 	startPhase := time.Now()
@@ -1449,7 +1489,7 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 		startCtx, cancel := context.WithTimeout(ctx, g.cfg.StartTimeout)
 		defer cancel()
 
-		log.Info("start started")
+		log.Info("start started", "phase", "start")
 		upid, err := g.client.StartVM(startCtx, plan.Node, plan.VMID)
 		if err != nil {
 			return err
@@ -1464,12 +1504,12 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 		return nil
 	})
 	if err != nil {
-		log.Error("start failed", "duration", time.Since(startPhase), "error", err)
+		log.Error("start failed", "phase", "start", "duration", humanDuration(startPhase), "error", err)
 		rollback()
 		return "", err
 	}
-	log.Info("start completed", "duration", time.Since(startPhase))
-	log.Info("provisioning completed")
+	log.Info("start completed", "phase", "start", "duration", humanDuration(startPhase))
+	log.Info("provisioning completed", "phase", "provision")
 
 	return id, nil
 }
@@ -1498,7 +1538,11 @@ func (g *Group) supportsLinkedClone(storage string) bool {
 	return ok
 }
 
-func (g *Group) deleteOne(ctx context.Context, id string) error {
+func (g *Group) deleteOne(ctx context.Context, id, operationID string) error {
+	started := time.Now()
+	log := g.log.With("operation_id", operationID, "operation", "decrease", "phase", "delete", "instance", id)
+	log.Info("deletion started")
+
 	instance, err := g.Get(ctx, id)
 	if err != nil {
 		return err
@@ -1516,8 +1560,11 @@ func (g *Group) deleteOne(ctx context.Context, id string) error {
 	}
 
 	if g.pool != nil {
-		return g.pool.Release(ctx, id)
+		if err := g.pool.Release(ctx, id); err != nil {
+			return err
+		}
 	}
+	log.Info("deletion completed", "duration", humanDuration(started))
 	return nil
 }
 
@@ -1676,7 +1723,7 @@ func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []pr
 
 		status, err := g.client.GetNodeStatus(ctx, node)
 		if err != nil {
-			g.log.Warn("skipping unavailable node", "node", node, "error", err)
+			g.log.Warn("skipping unavailable node", "phase", "placement", "node", node, "error", err)
 			skipped = append(skipped, fmt.Sprintf("%s: unavailable", node))
 			continue
 		}
@@ -1846,6 +1893,9 @@ func (g *Group) quarantineClonePlacement(plan provisionPlan, err error) {
 
 	g.log.Warn(
 		"quarantining clone placement after storage collision",
+		"operation_id", plan.OperationID,
+		"operation", "increase",
+		"phase", "clone",
 		"node", plan.Node,
 		"storage", key.Storage,
 		"vmid", plan.VMID,
@@ -2296,6 +2346,7 @@ func (g *Group) logEffectiveTopology() {
 
 		g.log.Info(
 			"validated node topology",
+			"phase", "init",
 			"node", node,
 			"template_vmid", choice.Resource.VMID,
 			"template_node", choice.Resource.Node,
@@ -2660,6 +2711,18 @@ func plannedIDs(plans []provisionPlan) []string {
 		ids = append(ids, instanceID(plan.Node, plan.VMID))
 	}
 	return ids
+}
+
+func (g *Group) nextOperationID(prefix string) string {
+	return fmt.Sprintf("%s-%x-%x", prefix, time.Now().UnixMilli(), g.operationSeq.Add(1))
+}
+
+func humanDuration(started time.Time) string {
+	return formatDuration(time.Since(started))
+}
+
+func formatDuration(duration time.Duration) string {
+	return duration.Round(time.Millisecond).String()
 }
 
 func mapState(status string) provider.State {
