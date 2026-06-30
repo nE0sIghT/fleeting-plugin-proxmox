@@ -91,6 +91,7 @@ type Group struct {
 	accepted        map[string]acceptedProvision
 	pendingByNode   map[string]pendingReservation
 	pendingVMIDs    map[int]struct{}
+	cloneQuarantine map[clonePlacementKey]time.Time
 	templatesByNode map[string]templateChoice
 	storageNodes    map[string]map[string]struct{}
 	storageShared   map[string]bool
@@ -110,7 +111,16 @@ var linkedClonePluginTypes = map[string]struct{}{
 	"nexenta":  {},
 }
 
-const managedByTag = "managed-by-fleeting-plugin-proxmox"
+const (
+	managedByTag                = "managed-by-fleeting-plugin-proxmox"
+	cloneCollisionQuarantineTTL = 30 * time.Minute
+)
+
+type clonePlacementKey struct {
+	Node    string
+	Storage string
+	VMID    int
+}
 
 type provisionPlan struct {
 	TemplateNode    string
@@ -184,19 +194,20 @@ const (
 func New(client *proxmoxclient.Client, log hclog.Logger, cfg Config, pool *ippool.Pool, cloneLimiter, startLimiter, deleteLimiter *limiter.Limiter) *Group {
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	return &Group{
-		client:        client,
-		log:           log,
-		cfg:           cfg,
-		pool:          pool,
-		cloneLimiter:  cloneLimiter,
-		startLimiter:  startLimiter,
-		deleteLimiter: deleteLimiter,
-		runCtx:        runCtx,
-		cancelRun:     cancelRun,
-		transient:     map[string]provider.State{},
-		accepted:      map[string]acceptedProvision{},
-		pendingByNode: map[string]pendingReservation{},
-		pendingVMIDs:  map[int]struct{}{},
+		client:          client,
+		log:             log,
+		cfg:             cfg,
+		pool:            pool,
+		cloneLimiter:    cloneLimiter,
+		startLimiter:    startLimiter,
+		deleteLimiter:   deleteLimiter,
+		runCtx:          runCtx,
+		cancelRun:       cancelRun,
+		transient:       map[string]provider.State{},
+		accepted:        map[string]acceptedProvision{},
+		pendingByNode:   map[string]pendingReservation{},
+		pendingVMIDs:    map[int]struct{}{},
+		cloneQuarantine: map[clonePlacementKey]time.Time{},
 	}
 }
 
@@ -1232,30 +1243,36 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	vmids, vmidErr := g.allocateVMIDs(vmResources, delta)
-	if len(vmids) == 0 && vmidErr != nil {
-		return nil, vmidErr
+	now := time.Now()
+	g.pruneCloneQuarantineLocked(now)
+	vmids := g.availableVMIDs(vmResources, delta+len(g.cloneQuarantine))
+	if len(vmids) == 0 {
+		return nil, fmt.Errorf("no free VMID in configured range")
 	}
 	g.applyAllocatedResources(states, vmResources)
 	g.applyPendingReservations(states)
-	plans := make([]provisionPlan, 0, len(vmids))
+	plans := make([]provisionPlan, 0, delta)
 	var errs []error
-	if vmidErr != nil {
-		errs = append(errs, vmidErr)
+	if len(vmids) < delta {
+		errs = append(errs, fmt.Errorf("only %d free VMIDs available in configured range", len(vmids)))
 	}
 
+	var lastPlacementErr error
 	for _, vmid := range vmids {
-		nodeInfos, dynamicSkipped := g.buildCandidateNodes(states)
+		if len(plans) == delta {
+			break
+		}
+
+		nodeInfos, dynamicSkipped, quarantineSkipped := g.buildCandidateNodesForVMID(states, vmid, now)
 		if len(nodeInfos) == 0 {
 			reasons := append(append([]string{}, skippedReasons...), dynamicSkipped...)
 			if len(reasons) == 0 {
 				reasons = scheduler.Diagnose(g.diagnosticNodes(states), g.cfg.Reserve, req)
 			}
-			placementErr := &scheduler.PlacementError{Reasons: reasons}
-			if len(placementErr.Reasons) > 0 {
-				g.log.Warn("placement rejected", "reasons", strings.Join(placementErr.Reasons, "; "))
+			lastPlacementErr = &scheduler.PlacementError{Reasons: reasons}
+			if quarantineSkipped {
+				continue
 			}
-			errs = append(errs, placementErr)
 			break
 		}
 
@@ -1267,11 +1284,11 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 				if len(placementErr.Reasons) == 0 {
 					placementErr.Reasons = scheduler.Diagnose(g.diagnosticNodes(states), g.cfg.Reserve, req)
 				}
-				if len(placementErr.Reasons) > 0 {
-					g.log.Warn("placement rejected", "reasons", strings.Join(placementErr.Reasons, "; "))
-				}
 			}
-			errs = append(errs, err)
+			lastPlacementErr = err
+			if quarantineSkipped {
+				continue
+			}
 			break
 		}
 
@@ -1285,6 +1302,14 @@ func (g *Group) planIncrease(ctx context.Context, delta int) ([]provisionPlan, e
 			Requirement:     req,
 		})
 		g.reservePlannedResources(states, targetNode, req)
+	}
+
+	if len(plans) < delta && lastPlacementErr != nil {
+		var placementErr *scheduler.PlacementError
+		if errors.As(lastPlacementErr, &placementErr) && len(placementErr.Reasons) > 0 {
+			g.log.Warn("placement rejected", "reasons", strings.Join(placementErr.Reasons, "; "))
+		}
+		errs = append(errs, lastPlacementErr)
 	}
 
 	g.registerPendingPlans(plans)
@@ -1351,9 +1376,11 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 	})
 	if err != nil {
 		log.Error("clone failed", "duration", time.Since(cloneStart), "error", err)
+		g.quarantineClonePlacement(plan, err)
 		rollback()
 		return "", err
 	}
+	g.clearClonePlacementQuarantine(plan)
 	log.Info("clone completed", "duration", time.Since(cloneStart))
 
 	description, err := g.renderDescription(plan.Node, plan.VMID, lease.IP)
@@ -1717,14 +1744,32 @@ func (g *Group) collectNodePlanStates(ctx context.Context, storageResources []pr
 }
 
 func (g *Group) buildCandidateNodes(states []nodePlanState) ([]scheduler.Node, []string) {
+	nodes, skipped, _ := g.buildCandidateNodesForVMID(states, 0, time.Now())
+	return nodes, skipped
+}
+
+func (g *Group) buildCandidateNodesForVMID(states []nodePlanState, vmid int, now time.Time) ([]scheduler.Node, []string, bool) {
 	nodes := make([]scheduler.Node, 0, len(states))
 	skipped := make([]string, 0)
+	quarantineSkipped := false
 	for _, state := range states {
 		targetStorage := ""
 		freeDiskGB := 0.0
 		if len(g.cfg.TargetStorages) > 0 {
 			bestFree := -1.0
 			for storage, free := range state.StorageFreeGB {
+				key := g.clonePlacementKey(provisionPlan{
+					TemplateNode:    state.TemplateNode,
+					TemplateStorage: state.TemplateStorage,
+					Node:            state.Name,
+					TargetStorage:   storage,
+					VMID:            vmid,
+				})
+				if until, quarantined := g.clonePlacementQuarantinedLocked(key, now); quarantined {
+					quarantineSkipped = true
+					skipped = append(skipped, fmt.Sprintf("%s: VMID %d on storage %s quarantined until %s", state.Name, vmid, key.Storage, until.Format(time.RFC3339)))
+					continue
+				}
 				if free > bestFree {
 					bestFree = free
 					targetStorage = storage
@@ -1735,13 +1780,98 @@ func (g *Group) buildCandidateNodes(states []nodePlanState) ([]scheduler.Node, [
 				skipped = append(skipped, fmt.Sprintf("%s: no eligible target storage from allowlist %s", state.Name, strings.Join(g.cfg.TargetStorages, ",")))
 				continue
 			}
+		} else {
+			key := g.clonePlacementKey(provisionPlan{
+				TemplateNode:    state.TemplateNode,
+				TemplateStorage: state.TemplateStorage,
+				Node:            state.Name,
+				VMID:            vmid,
+			})
+			if until, quarantined := g.clonePlacementQuarantinedLocked(key, now); quarantined {
+				quarantineSkipped = true
+				skipped = append(skipped, fmt.Sprintf("%s: VMID %d on default storage quarantined until %s", state.Name, vmid, until.Format(time.RFC3339)))
+				continue
+			}
 		}
 
 		node := state.schedulerNode(targetStorage)
 		node.FreeDiskGB = freeDiskGB
 		nodes = append(nodes, node)
 	}
-	return nodes, skipped
+	return nodes, skipped, quarantineSkipped
+}
+
+func (g *Group) clonePlacementQuarantinedLocked(key clonePlacementKey, now time.Time) (time.Time, bool) {
+	until, ok := g.cloneQuarantine[key]
+	if !ok {
+		return time.Time{}, false
+	}
+	if !now.Before(until) {
+		delete(g.cloneQuarantine, key)
+		return time.Time{}, false
+	}
+	return until, true
+}
+
+func (g *Group) pruneCloneQuarantineLocked(now time.Time) {
+	for key, until := range g.cloneQuarantine {
+		if !now.Before(until) {
+			delete(g.cloneQuarantine, key)
+		}
+	}
+}
+
+func (g *Group) clonePlacementKey(plan provisionPlan) clonePlacementKey {
+	storage := plan.TargetStorage
+	if g.effectiveCloneMode(plan) == "linked" {
+		storage = plan.TemplateStorage
+	}
+	return clonePlacementKey{Node: plan.Node, Storage: storage, VMID: plan.VMID}
+}
+
+func (g *Group) quarantineClonePlacement(plan provisionPlan, err error) {
+	if !isCloneVolumeCollision(err, plan.VMID) {
+		return
+	}
+
+	key := g.clonePlacementKey(plan)
+	until := time.Now().Add(cloneCollisionQuarantineTTL)
+
+	g.mu.Lock()
+	if g.cloneQuarantine == nil {
+		g.cloneQuarantine = map[clonePlacementKey]time.Time{}
+	}
+	g.cloneQuarantine[key] = until
+	g.mu.Unlock()
+
+	g.log.Warn(
+		"quarantining clone placement after storage collision",
+		"node", plan.Node,
+		"storage", key.Storage,
+		"vmid", plan.VMID,
+		"until", until,
+	)
+}
+
+func (g *Group) clearClonePlacementQuarantine(plan provisionPlan) {
+	key := g.clonePlacementKey(plan)
+	g.mu.Lock()
+	delete(g.cloneQuarantine, key)
+	g.mu.Unlock()
+}
+
+func isCloneVolumeCollision(err error, vmid int) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if !strings.Contains(message, "already exists") {
+		return false
+	}
+	if !strings.Contains(message, "disk image") && !strings.Contains(message, "volume") {
+		return false
+	}
+	return strings.Contains(message, fmt.Sprintf("vm-%d-", vmid))
 }
 
 func stateTemplateStorage(states []nodePlanState, node string) string {
@@ -2335,7 +2465,7 @@ func (g *Group) findTemplates(resources []proxmoxclient.ClusterResource) ([]prox
 	return templates, nil
 }
 
-func (g *Group) allocateVMIDs(resources []proxmoxclient.ClusterResource, count int) ([]int, error) {
+func (g *Group) availableVMIDs(resources []proxmoxclient.ClusterResource, limit int) []int {
 	used := map[int]struct{}{}
 	for _, resource := range resources {
 		if resource.VMID > 0 {
@@ -2345,20 +2475,17 @@ func (g *Group) allocateVMIDs(resources []proxmoxclient.ClusterResource, count i
 	for vmid := range g.pendingVMIDs {
 		used[vmid] = struct{}{}
 	}
-	vmids := make([]int, 0, count)
+	vmids := make([]int, 0, limit)
 	for vmid := g.cfg.VMIDMin; vmid <= g.cfg.VMIDMax; vmid++ {
 		if _, exists := used[vmid]; exists {
 			continue
 		}
 		vmids = append(vmids, vmid)
-		if len(vmids) == count {
-			return vmids, nil
+		if len(vmids) == limit {
+			break
 		}
 	}
-	if len(vmids) == 0 {
-		return nil, fmt.Errorf("no free VMID in configured range")
-	}
-	return vmids, fmt.Errorf("only %d free VMIDs available in configured range", len(vmids))
+	return vmids
 }
 
 func (g *Group) isManaged(resource proxmoxclient.ClusterResource) bool {

@@ -2,7 +2,9 @@ package instancegroup
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -118,6 +120,58 @@ func TestPendingReservationsAffectNextPlanningPass(t *testing.T) {
 	selected, err := group.cfg.Scheduler.Select(candidates, scheduler.Reserve{}, req)
 	require.NoError(t, err)
 	require.Equal(t, "node2", selected.Name)
+}
+
+func TestClonePlacementQuarantineIsScopedAndExpires(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	key := clonePlacementKey{Node: "node1", Storage: "fast-a", VMID: 5000}
+	group := &Group{
+		cfg: Config{
+			TargetStorages: []string{"fast-a", "fast-b"},
+		},
+		cloneQuarantine: map[clonePlacementKey]time.Time{
+			key: now.Add(cloneCollisionQuarantineTTL),
+		},
+	}
+	states := []nodePlanState{
+		{
+			Name: "node1",
+			StorageFreeGB: map[string]float64{
+				"fast-a": 100,
+				"fast-b": 80,
+			},
+		},
+	}
+
+	candidates, skipped, quarantineSkipped := group.buildCandidateNodesForVMID(states, 5000, now)
+	require.True(t, quarantineSkipped)
+	require.Len(t, candidates, 1)
+	require.Equal(t, "fast-b", candidates[0].TargetStorage)
+	require.NotEmpty(t, skipped)
+
+	candidates, skipped, quarantineSkipped = group.buildCandidateNodesForVMID(states, 5001, now)
+	require.False(t, quarantineSkipped)
+	require.Len(t, candidates, 1)
+	require.Equal(t, "fast-a", candidates[0].TargetStorage)
+	require.Empty(t, skipped)
+
+	candidates, skipped, quarantineSkipped = group.buildCandidateNodesForVMID(states, 5000, now.Add(cloneCollisionQuarantineTTL))
+	require.False(t, quarantineSkipped)
+	require.Len(t, candidates, 1)
+	require.Equal(t, "fast-a", candidates[0].TargetStorage)
+	require.Empty(t, skipped)
+	require.NotContains(t, group.cloneQuarantine, key)
+}
+
+func TestCloneVolumeCollisionDetection(t *testing.T) {
+	t.Parallel()
+
+	err := errors.New("clone failed: disk image '/mnt/pve/nvme4/images/520002/vm-520002-cloudinit.raw' already exists")
+	require.True(t, isCloneVolumeCollision(err, 520002))
+	require.False(t, isCloneVolumeCollision(err, 520003))
+	require.False(t, isCloneVolumeCollision(errors.New("clone failed: connection reset"), 520002))
 }
 
 func TestApplyAllocatedResourcesCountsRunningVMs(t *testing.T) {

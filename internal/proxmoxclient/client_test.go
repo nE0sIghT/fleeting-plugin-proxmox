@@ -89,6 +89,30 @@ func TestDecodeResponseIncludesProxmoxStatusMessage(t *testing.T) {
 	require.ErrorContains(t, err, `body={"data":null}`)
 }
 
+func TestDeleteVMDestroysUnreferencedDisks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodDelete, r.Method)
+		require.Equal(t, "/api2/json/nodes/node1/qemu/5000", r.URL.Path)
+		require.Equal(t, "1", r.URL.Query().Get("purge"))
+		require.Equal(t, "1", r.URL.Query().Get("destroy-unreferenced-disks"))
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":"UPID:delete"}`))
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{
+		BaseURL:     server.URL,
+		TokenID:     "user@pam!token",
+		TokenSecret: "secret",
+	})
+	require.NoError(t, err)
+
+	upid, err := client.DeleteVM(context.Background(), "node1", 5000)
+	require.NoError(t, err)
+	require.Equal(t, "UPID:delete", upid)
+}
+
 func TestClusterResourceAcceptsQuotedNumbers(t *testing.T) {
 	var resource ClusterResource
 	err := json.Unmarshal([]byte(`{

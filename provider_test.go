@@ -47,6 +47,8 @@ type mockProxmox struct {
 	taskNode                 map[string]string
 	cloneDelay               time.Duration
 	failClone                bool
+	cloneCollisionVMIDs      map[int]bool
+	cloneAttempts            map[int]int
 	failMigrate              bool
 	failConvert              bool
 	failLinkedCloneOnStorage map[string]bool
@@ -72,6 +74,8 @@ func newMockProxmox() *mockProxmox {
 		},
 		vms:                      map[int]mockVM{},
 		taskNode:                 map[string]string{},
+		cloneCollisionVMIDs:      map[int]bool{},
+		cloneAttempts:            map[int]int{},
 		failLinkedCloneOnStorage: map[string]bool{},
 		downNodes:                map[string]bool{},
 		rootFSUsed:               int64(50 * 1024 * 1024 * 1024),
@@ -206,6 +210,12 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 			require.NoError(t, r.ParseForm())
 			vmid, err := strconv.Atoi(r.PostForm.Get("newid"))
 			require.NoError(t, err)
+			m.cloneAttempts[vmid]++
+			if m.cloneCollisionVMIDs[vmid] {
+				w.WriteHeader(http.StatusInternalServerError)
+				write(fmt.Sprintf("clone failed: disk image '/mnt/pve/ceph-vm/images/%d/vm-%d-cloudinit.raw' already exists", vmid, vmid))
+				return
+			}
 			if m.failClone {
 				w.WriteHeader(http.StatusInternalServerError)
 				write("clone failed")
@@ -721,6 +731,66 @@ func TestFailedAsyncProvisioningReportsDeletedAfterCreating(t *testing.T) {
 		require.NoError(t, err)
 		return states["node1/5000"] == provider.StateDeleted
 	}, 500*time.Millisecond, 25*time.Millisecond)
+}
+
+func TestCloneStorageCollisionQuarantinesPlacementAndUsesNextVMID(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockProxmox()
+	mock.cloneCollisionVMIDs[5000] = true
+
+	server := httptest.NewServer(mock.handler(t))
+	defer server.Close()
+
+	group := &InstanceGroup{}
+	group.APIURL = server.URL
+	group.TokenID = "root@pam!runner"
+	group.TokenSecret = "secret"
+	group.ClusterName = "lab"
+	group.Pool = "ci"
+	group.TemplateVMIDs = []int{9000}
+	group.TemplateStageMode = "off"
+	group.NamePrefix = "runner"
+	group.VMIDRange = "5000-5005"
+	group.Nodes = LaxStringList{"node1"}
+	group.NetworkMode = "dhcp"
+	group.CloneMode = "full"
+	group.TargetStorages = LaxStringList{"ceph-vm"}
+
+	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, group.Shutdown(context.Background()))
+	}()
+
+	count, err := group.Increase(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	require.Eventually(t, func() bool {
+		states := map[string]provider.State{}
+		err = group.Update(context.Background(), func(instance string, state provider.State) {
+			states[instance] = state
+		})
+		require.NoError(t, err)
+		return states["node1/5000"] == provider.StateDeleted
+	}, 500*time.Millisecond, 25*time.Millisecond)
+
+	count, err = group.Increase(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	require.Eventually(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		vm, ok := mock.vms[5001]
+		return ok && vm.Status == "running"
+	}, 2*time.Second, 25*time.Millisecond)
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	require.Equal(t, 1, mock.cloneAttempts[5000])
+	require.Equal(t, 1, mock.cloneAttempts[5001])
 }
 
 func TestTargetStoragePlacementIgnoresNodeRootFS(t *testing.T) {

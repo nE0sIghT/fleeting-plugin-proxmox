@@ -622,6 +622,7 @@ func (c *Client) ConvertVMToTemplate(ctx context.Context, node string, vmid int)
 func (c *Client) DeleteVM(ctx context.Context, node string, vmid int) (string, error) {
 	form := url.Values{}
 	form.Set("purge", "1")
+	form.Set("destroy-unreferenced-disks", "1")
 	return c.deleteString(ctx, path.Join("/nodes", node, "qemu", fmt.Sprintf("%d", vmid)), form)
 }
 
