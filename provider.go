@@ -89,6 +89,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		AllowedServerNames: g.config().tlsServerNames(),
 		Info:               g.log.Info,
 		Warn:               g.log.Warn,
+		RetryMaxElapsed:    g.parsedAPIRetryMaxElapsed,
 	})
 	if err != nil {
 		return g.failInit(err)
