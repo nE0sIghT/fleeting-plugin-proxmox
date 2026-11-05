@@ -57,3 +57,5 @@ jobs:
         run: |
           make clean
           make build
+          go version -m dist/fleeting-plugin-proxmox | grep -Fx $'\tbuild\tGOOS='"${GOOS}"
+          go version -m dist/fleeting-plugin-proxmox | grep -Fx $'\tbuild\tGOARCH='"${GOARCH}"

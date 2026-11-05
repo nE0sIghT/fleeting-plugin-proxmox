@@ -1,5 +1,8 @@
 GO ?= go
 GOFMT ?= gofmt
+GOOS ?= linux
+GOARCH ?= amd64
+CGO_ENABLED ?= 0
 BINARY ?= dist/fleeting-plugin-proxmox
 VERSION ?= $(shell tag=$$(git describe --tags --exact-match 2>/dev/null || true); if [ -n "$$tag" ]; then printf '%s' "$${tag#v}"; else printf 'dev-%s' "$$(git rev-parse --short HEAD)"; fi)
 REVISION ?= $(shell git rev-parse HEAD)
@@ -15,7 +18,7 @@ LDFLAGS ?= -s -w \
 
 build:
 	mkdir -p $(dir $(BINARY))
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/fleeting-plugin-proxmox
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/fleeting-plugin-proxmox
 
 test:
 	$(GO) test ./...
