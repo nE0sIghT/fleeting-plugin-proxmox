@@ -75,6 +75,7 @@ type ManagedInstance struct {
 }
 
 type Group struct {
+	placement     metrics.PlacementControl
 	client        *proxmoxclient.Client
 	log           hclog.Logger
 	cfg           Config
@@ -138,6 +139,7 @@ type provisionPlan struct {
 }
 
 type pendingReservation struct {
+	Count     int
 	MemoryMB  float64
 	CPUCores  float64
 	StorageGB map[string]float64
@@ -926,15 +928,11 @@ func (g *Group) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
 		return metrics.Snapshot{}, err
 	}
 
-	var storageResources []proxmoxclient.ClusterResource
-	storageNodes := map[string]map[string]struct{}{}
-	if len(g.cfg.TargetStorages) > 0 {
-		storageResources, err = g.client.ListClusterResources(ctx, "storage")
-		if err != nil {
-			return metrics.Snapshot{}, err
-		}
-		storageNodes = indexStorageNodes(storageResources)
+	storageResources, err := g.client.ListClusterResources(ctx, "storage")
+	if err != nil {
+		return metrics.Snapshot{}, err
 	}
+	storageNodes := indexStorageNodes(storageResources)
 
 	states, _, err := g.collectNodePlanStates(ctx, storageResources, storageNodes)
 	if err != nil {
@@ -946,9 +944,64 @@ func (g *Group) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
 	g.applyPendingReservations(states)
 	pendingInstances := len(g.pendingVMIDs)
 	instances := g.instanceStateCountsLocked(vmResources)
+	nodePending := map[string]int{}
+	for node, pending := range g.pendingByNode {
+		nodePending[node] = pending.Count
+	}
+	for id, state := range g.transient {
+		if state == provider.StateDeleting {
+			if node, _, err := parseInstanceID(id); err == nil {
+				nodePending[node]++
+			}
+		}
+	}
+	nodeErrors := map[string]string{}
+	for _, node := range g.cfg.Nodes {
+		found := false
+		for _, state := range states {
+			if state.Name == node {
+				found = true
+				break
+			}
+		}
+		if !found {
+			nodeErrors[node] = "node resources unavailable or no usable template"
+		}
+	}
+	for node := range g.unavailableNodes {
+		nodeErrors[node] = "unavailable"
+	}
+	details := []metrics.InstanceSnapshot{}
+	templates := map[string]int{}
+	seen := map[string]bool{}
+	for _, resource := range vmResources {
+		if g.isManagedTemplate(resource) {
+			templates[resource.Node]++
+		}
+		if !g.isManaged(resource) {
+			continue
+		}
+		id := instanceID(resource.Node, resource.VMID)
+		seen[id] = true
+		state := mapState(resource.Status)
+		if transient, ok := g.transient[id]; ok {
+			state = transient
+		}
+		details = append(details, metrics.InstanceSnapshot{ID: id, Node: resource.Node, State: string(state)})
+	}
+	for id, accepted := range g.accepted {
+		if !seen[id] {
+			details = append(details, metrics.InstanceSnapshot{ID: id, Node: accepted.Node, State: string(accepted.State)})
+		}
+	}
 	g.mu.Unlock()
 
 	snapshot := metrics.Snapshot{
+		ConfiguredNodes:   append([]string{}, g.cfg.Nodes...),
+		NodePending:       nodePending,
+		NodeErrors:        nodeErrors,
+		NodeTemplates:     templates,
+		InstanceDetails:   details,
 		Version:           1,
 		Identity:          metrics.Identity{Cluster: g.cfg.ClusterName, Pool: g.cfg.Pool, Group: g.cfg.NamePrefix},
 		Up:                true,
@@ -962,7 +1015,16 @@ func (g *Group) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
 		resourceTotals := state.resourceTotals()
 		memoryReserveBytes := state.Reserve.MemoryMBFor(resourceTotals) * 1024.0 * 1024.0
 		cpuReserveCores := state.Reserve.CPUCoresFor(resourceTotals)
+		req := scheduler.Requirement{MemoryMB: g.requiredMemoryMB(), CPUCores: g.requiredCPUCores()}
+		if len(g.cfg.TargetStorages) > 0 {
+			req.DiskGB = g.requiredDiskGB()
+		}
+		failures := scheduler.Diagnose(g.diagnosticNodes([]nodePlanState{state}), g.cfg.Reserve, req)
+		if err := g.placement.Check(state.Name); err != nil {
+			failures = append(failures, err.Error())
+		}
 		snapshot.Nodes = append(snapshot.Nodes, metrics.NodeSnapshot{
+			PlacementFailures:                 failures,
 			Node:                              state.Name,
 			TotalCPUCores:                     state.TotalCPUCores,
 			RuntimeFreeCPUCores:               state.FreeCPUCores,
@@ -988,6 +1050,25 @@ func (g *Group) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
 				ReservedBytes: state.Reserve.DiskGBFor(schedulerNode) * 1024.0 * 1024.0 * 1024.0,
 			})
 		}
+	}
+	for _, storage := range storageResources {
+		if storage.Type != "storage" || !containsString(g.cfg.Nodes, storage.Node) {
+			continue
+		}
+		view := metrics.StorageSnapshot{Node: storage.Node, Storage: storage.Storage, Status: storage.Status, Shared: storage.Shared == 1,
+			TotalBytes: float64(storage.MaxDisk), FreeBytes: float64(storage.MaxDisk - storage.Disk), Eligible: containsString(g.cfg.TargetStorages, storage.Storage)}
+		if len(g.cfg.TargetStorages) == 0 {
+			view.Eligible = g.templatesByNode[storage.Node].Storage == storage.Storage
+		}
+		for _, state := range states {
+			if state.Name != storage.Node {
+				continue
+			}
+			node := state.schedulerNode(storage.Storage)
+			node.TotalDiskGB = float64(storage.MaxDisk) / (1024 * 1024 * 1024)
+			view.ReservedBytes = state.Reserve.DiskGBFor(node) * 1024 * 1024 * 1024
+		}
+		snapshot.ObservedStorages = append(snapshot.ObservedStorages, view)
 	}
 
 	return snapshot, nil
@@ -1059,6 +1140,10 @@ func (g *Group) Increase(ctx context.Context, delta int) ([]string, error) {
 
 			if _, err := g.provisionOne(g.runCtx, plan); err != nil {
 				g.failAcceptedProvision(plan)
+				if errors.Is(err, metrics.ErrPlacementPaused) {
+					g.log.Info("provisioning skipped", "operation_id", plan.OperationID, "instance", id, "error", err)
+					return
+				}
 				g.log.Error(
 					"provisioning failed",
 					"operation_id", plan.OperationID,
@@ -1379,6 +1464,9 @@ func (g *Group) planIncrease(ctx context.Context, delta int, operationID string)
 }
 
 func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, error) {
+	if err := g.placement.Check(plan.Node); err != nil {
+		return "", err
+	}
 	id := instanceID(plan.Node, plan.VMID)
 	var lease ippool.Lease
 	var err error
@@ -1428,6 +1516,10 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 	log.Info("provisioning started", "phase", "provision")
 	cloneStart := time.Now()
 	err = g.cloneLimiter.Do(cloneCtx, func(ctx context.Context) error {
+		release, err := g.placement.BeginClone(plan.Node)
+		if err != nil {
+			return err
+		}
 		log.Info("clone started", "phase", "clone")
 		effectiveMode := g.effectiveCloneMode(plan)
 		targetStorage := plan.TargetStorage
@@ -1444,12 +1536,21 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 			Full:          fullClone,
 			Snapshot:      g.cfg.CloneSnapshot,
 		})
+		release()
 		if err != nil {
 			return err
 		}
 		return g.client.WaitForTask(ctx, plan.TemplateNode, upid, g.cfg.TaskPollInterval)
 	})
 	if err != nil {
+		if errors.Is(err, metrics.ErrPlacementPaused) {
+			if g.pool != nil {
+				if cleanupErr := g.pool.Forget(ctx, id); cleanupErr != nil {
+					g.reportPlanProblem(plan, "cleanup_failed", metrics.ProblemRecent, "cleanup", cleanupErr, time.Time{})
+				}
+			}
+			return "", err
+		}
 		log.Error("clone failed", "phase", "clone", "duration", humanDuration(cloneStart), "error", err)
 		if isCloneVolumeCollision(err, plan.VMID) {
 			g.reportPlanProblem(plan, "clone_volume_collision", metrics.ProblemActive, "clone", err, time.Now().Add(cloneCollisionQuarantineTTL))
@@ -1848,6 +1949,10 @@ func (g *Group) buildCandidateNodesForVMID(states []nodePlanState, vmid int, now
 	skipped := make([]string, 0)
 	quarantineSkipped := false
 	for _, state := range states {
+		if err := g.placement.Check(state.Name); err != nil {
+			skipped = append(skipped, err.Error())
+			continue
+		}
 		targetStorage := ""
 		freeDiskGB := 0.0
 		if len(g.cfg.TargetStorages) > 0 {
@@ -2122,6 +2227,7 @@ func (g *Group) applyPendingReservations(states []nodePlanState) {
 func (g *Group) registerPendingPlans(plans []provisionPlan) {
 	for _, plan := range plans {
 		pending := g.pendingByNode[plan.Node]
+		pending.Count++
 		pending.MemoryMB += plan.Requirement.MemoryMB
 		pending.CPUCores += plan.Requirement.CPUCores
 		if plan.TargetStorage != "" && plan.Requirement.DiskGB > 0 {
@@ -2141,6 +2247,7 @@ func (g *Group) releasePendingPlan(plan provisionPlan) {
 
 	pending, ok := g.pendingByNode[plan.Node]
 	if ok {
+		pending.Count--
 		pending.MemoryMB -= plan.Requirement.MemoryMB
 		if pending.MemoryMB < 0 {
 			pending.MemoryMB = 0

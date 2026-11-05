@@ -2,10 +2,8 @@ package metrics
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -26,6 +24,8 @@ const (
 )
 
 type ExporterConfig struct {
+	ControlSocket    string
+	ControlStateFile string
 	ListenAddress    string
 	SocketPath       string
 	MetricsPath      string
@@ -37,7 +37,11 @@ type ExporterConfig struct {
 }
 
 type Exporter struct {
-	cfg ExporterConfig
+	controlMu    sync.Mutex
+	controlState DrainState
+	sessions     map[string]*controlSession
+	stopping     bool
+	cfg          ExporterConfig
 
 	mu                sync.Mutex
 	fileMu            sync.Mutex
@@ -52,6 +56,12 @@ func RunExporter(ctx context.Context, cfg ExporterConfig) error {
 }
 
 func NewExporter(cfg ExporterConfig) *Exporter {
+	if cfg.ControlSocket == "" {
+		cfg.ControlSocket = DefaultControlSocket
+	}
+	if cfg.ControlStateFile == "" {
+		cfg.ControlStateFile = DefaultControlStateFile
+	}
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = DefaultExporterListenAddress
 	}
@@ -77,6 +87,8 @@ func NewExporter(cfg ExporterConfig) *Exporter {
 		cfg.SocketMode = DefaultSocketMode
 	}
 	return &Exporter{
+		controlState:      DrainState{Epoch: newProblemSource(), Nodes: []NodeRef{}},
+		sessions:          map[string]*controlSession{},
 		cfg:               cfg,
 		snapshots:         map[string]storedSnapshot{},
 		problems:          map[string]storedProblem{},
@@ -85,6 +97,14 @@ func NewExporter(cfg ExporterConfig) *Exporter {
 }
 
 func (e *Exporter) Run(ctx context.Context) error {
+	if err := e.loadControl(); err != nil {
+		return err
+	}
+	controlListener, err := listenUnix(e.cfg.ControlSocket, e.cfg.SocketMode)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = controlListener.Close(); _ = os.Remove(e.cfg.ControlSocket) }()
 	listener, err := listenUnix(e.cfg.SocketPath, e.cfg.SocketMode)
 	if err != nil {
 		return err
@@ -107,7 +127,8 @@ func (e *Exporter) Run(ctx context.Context) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	errs := make(chan error, 2)
+	errs := make(chan error, 3)
+	go func() { errs <- e.serveControl(controlListener) }()
 	go func() {
 		errs <- e.serveUnix(listener)
 	}()
@@ -119,6 +140,16 @@ func (e *Exporter) Run(ctx context.Context) error {
 		errs <- err
 	}()
 	shutdown := func() {
+		_ = controlListener.Close()
+		_ = listener.Close()
+		e.controlMu.Lock()
+		e.stopping = true
+		for _, s := range e.sessions {
+			if s.conn != nil {
+				_ = s.conn.Close()
+			}
+		}
+		e.controlMu.Unlock()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = listener.Close()
@@ -189,13 +220,25 @@ func (e *Exporter) handleUnixConn(conn net.Conn) {
 	defer conn.Close()
 
 	var snapshot Snapshot
-	decoder := json.NewDecoder(io.LimitReader(conn, 1<<20))
-	if err := decoder.Decode(&snapshot); err != nil {
+	scanner := newIPCScanner(conn)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := decodeLine(scanner, &snapshot); err != nil {
 		return
 	}
-	if snapshot.Version != 1 || snapshot.Identity.Cluster == "" || snapshot.Identity.Pool == "" || snapshot.Identity.Group == "" {
+	if snapshot.Identity.Cluster == "" || snapshot.Identity.Pool == "" || snapshot.Identity.Group == "" {
 		return
 	}
+	if snapshot.Version == 2 && snapshot.Type == "hello" {
+		e.handleSession(conn, scanner, snapshot)
+		return
+	}
+	if snapshot.Version != 1 {
+		return
+	}
+	e.storeSnapshot(snapshot)
+}
+
+func (e *Exporter) storeSnapshot(snapshot Snapshot) {
 	if snapshot.TimestampUnix == 0 {
 		snapshot.TimestampUnix = time.Now().Unix()
 	}

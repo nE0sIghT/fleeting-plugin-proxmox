@@ -286,9 +286,55 @@ metrics_socket = "/run/fleeting-plugin-proxmox/metrics.sock"
 metrics_interval = "15s"
 ```
 
-The reporter does not fail plugin initialization when the socket is missing. It retries until the exporter appears, and reconnects on later exporter restarts.
+The reporter does not fail plugin initialization when the socket is missing. It retries until the exporter appears, and reconnects on later exporter restarts. With `metrics_socket` configured, new workload placement waits for its first control-state synchronization. Existing workloads continue running. After synchronization, a disconnected plugin keeps its last applied drain state.
+
+Upgrade the exporter before upgrading managed plugin processes. Older plugins can still send metrics, but cannot acknowledge drain. New plugins require the upgraded exporter to permit their first placement.
 
 An example systemd service is provided at [`examples/fleeting-plugin-proxmox-metrics-exporter.service`](/workspace/fleeting-plugin-proxmox/examples/fleeting-plugin-proxmox-metrics-exporter.service).
+
+### Local CLI, TUI, and Node Drain
+
+The exporter also serves as the local control service. It listens on two Unix sockets:
+
+- `metrics.sock`: persistent bidirectional connections initiated by plugin processes; snapshots, drain state, and acknowledgements.
+- `control.sock`: CLI/TUI requests and responses. No management operations are exposed on the Prometheus HTTP port.
+
+Both sockets default to mode `0660`. Run the service and plugins as `gitlab-runner`, and run the CLI as that user or root. The example unit uses `RuntimeDirectory` for `/run/fleeting-plugin-proxmox` and `StateDirectory` for `/var/lib/fleeting-plugin-proxmox`.
+
+All modes are in the same binary:
+
+```shell
+fleeting-plugin-proxmox ctl status
+fleeting-plugin-proxmox tui
+
+ln -s /usr/local/bin/fleeting-plugin-proxmox /usr/local/bin/fleeting-proxmoxctl
+ln -s /usr/local/bin/fleeting-plugin-proxmox /usr/local/bin/fleeting-proxmox-tui
+
+fleeting-proxmoxctl nodes --cluster cluster01
+fleeting-proxmoxctl storages --cluster cluster01 --node node05
+fleeting-proxmoxctl fleets
+fleeting-proxmoxctl instances --cluster cluster01 --node node05
+fleeting-proxmoxctl problems
+fleeting-proxmoxctl status --json
+```
+
+Drain applies to every registered local fleet using the selected cluster/node. Multiple nodes may be specified in one command:
+
+```shell
+fleeting-proxmoxctl drain cluster01/node05 cluster01/node06
+fleeting-proxmoxctl drain cluster01/node05 --wait --timeout 30m
+fleeting-proxmoxctl undrain cluster01/node05
+```
+
+Without `--wait`, a successful command means every affected connected plugin has acknowledged the placement state. An offline or legacy plugin prevents confirmation. With `--wait`, drain also waits for fresh observations showing no working VMs or pending provisioning on the selected nodes. A timeout does not undo the saved command. Exit codes: `0` success, `1` command/connection error, `2` timeout, `130` cancellation.
+
+Drain prevents new workload clones, including plans queued behind the clone limiter. A clone submission already in progress is allowed to finish before acknowledgement. Running VMs are not interrupted or migrated: GitLab Runner removes them through its normal lifecycle. Idle policies may retain VMs indefinitely; `--wait` does not force their deletion. Managed staged templates are counted separately and do not prevent a node from being empty of working VMs. Template preparation during plugin initialization remains unchanged. Drain confirmation is local to registered fleets; it makes no claim about other Runner hosts or unmanaged VMs.
+
+The node table distinguishes placement state, acknowledgement (`CONFIRMED`), and observed absence of working VMs (`EMPTY`). Disconnected fleets, failed/stale collections, or missing node resources prevent confirmation of emptiness. CPU/RAM and storage observations are shown per fleet with their policies; shared physical resources are never summed across fleets. Storage views include visible storages on the fleet's configured nodes, with eligibility and shared-storage status. All observations are limited by the plugin token's API permissions.
+
+In the TUI, use arrows to select a node, Space to select multiple nodes, `d` to drain, and `u` to resume placement. Keys `1` through `5` select resources, storages, VMs, problems, and fleets. Tab switches focus between the node table and the scrollable details; `q` exits. CLI/TUI connect locally and reconnect on subsequent requests if the service restarts.
+
+Drain state and the known fleet inventory are saved atomically to `/var/lib/fleeting-plugin-proxmox/control.json`; preserve this file across service restarts. The service restores known fleets as disconnected until they register again. Exporter flags `--control-socket` and `--control-state-file` override the defaults; CLI/TUI accept `--socket`. A malformed/unreadable state file prevents service startup instead of silently enabling drained nodes. Each fleet must enable `metrics_socket` to participate in management. Configuration hot reload is not implemented.
 
 The exporter also aggregates operational problems from every plugin process using the same socket. A human-readable summary is written atomically to:
 

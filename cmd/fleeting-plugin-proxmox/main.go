@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -14,9 +15,27 @@ import (
 	"gitlab.com/gitlab-org/fleeting/fleeting/plugin"
 	proxmox "gitlab.com/gitlab-org/fleeting/plugins/proxmox"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/metrics"
+	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/operator"
 )
 
 func main() {
+	name := filepath.Base(os.Args[0])
+	args := os.Args[1:]
+	if name == "fleeting-proxmox-tui" {
+		args = append([]string{"tui"}, args...)
+	}
+	if name == "fleeting-proxmoxctl" || name == "fleeting-proxmox-tui" || (len(args) > 0 && (args[0] == "ctl" || args[0] == "tui")) {
+		if len(args) > 0 && args[0] == "ctl" {
+			args = args[1:]
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		if err := operator.Run(ctx, args, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(operator.ExitCode(err))
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "metrics-exporter" {
 		runMetricsExporter(os.Args[2:])
 		return
@@ -31,6 +50,8 @@ func runMetricsExporter(args []string) {
 	fs := flag.NewFlagSet("metrics-exporter", flag.ExitOnError)
 	listen := fs.String("listen", metrics.DefaultExporterListenAddress, "HTTP listen address for Prometheus scrapes")
 	socket := fs.String("socket", metrics.DefaultExporterSocketPath, "Unix socket path for plugin metrics snapshots")
+	controlSocket := fs.String("control-socket", metrics.DefaultControlSocket, "Unix socket for local CLI/TUI")
+	controlState := fs.String("control-state-file", metrics.DefaultControlStateFile, "Persistent node drain state")
 	path := fs.String("path", metrics.DefaultExporterMetricsPath, "HTTP path for Prometheus metrics")
 	staleAfter := fs.Duration("stale-after", metrics.DefaultExporterStaleAfter, "Duration after which a silent plugin group is marked down")
 	exceptionsFile := fs.String("exceptions-file", metrics.DefaultExceptionsFile, "Path to the aggregated human-readable problem summary")
@@ -54,6 +75,7 @@ func runMetricsExporter(args []string) {
 	defer stop()
 
 	cfg := metrics.ExporterConfig{
+		ControlSocket: *controlSocket, ControlStateFile: *controlState,
 		ListenAddress:    *listen,
 		SocketPath:       *socket,
 		MetricsPath:      *path,
@@ -65,12 +87,14 @@ func runMetricsExporter(args []string) {
 	}
 	fmt.Fprintf(
 		os.Stderr,
-		"starting fleeting-plugin-proxmox metrics exporter listen=%s socket=%s path=%s exceptions=%s retention=%s\n",
+		"starting fleeting-plugin-proxmox metrics exporter listen=%s socket=%s path=%s exceptions=%s retention=%s control_socket=%s control_state=%s\n",
 		cfg.ListenAddress,
 		cfg.SocketPath,
 		cfg.MetricsPath,
 		cfg.ExceptionsFile,
 		cfg.ProblemRetention,
+		cfg.ControlSocket,
+		cfg.ControlStateFile,
 	)
 	if err := metrics.RunExporter(ctx, cfg); err != nil {
 		log.Fatal(err)

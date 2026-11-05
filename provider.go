@@ -152,6 +152,9 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		problemReporter,
 	)
 
+	if g.metricsReporter != nil {
+		g.group.EnableControl()
+	}
 	if err := g.group.Init(ctx); err != nil {
 		return g.failInit(err)
 	}
@@ -177,8 +180,10 @@ func (g *InstanceGroup) configureMetricsReporter(interval time.Duration) {
 		return
 	}
 	g.metricsReporter = metrics.NewReporter(metrics.ReporterConfig{
-		SocketPath: g.MetricsSocket,
-		Interval:   interval,
+		ControlNodes: []string(g.Nodes),
+		ApplyControl: func(state metrics.DrainState) { g.group.ApplyControl(state) },
+		SocketPath:   g.MetricsSocket,
+		Interval:     interval,
 		Identity: metrics.Identity{
 			Cluster: g.ClusterName,
 			Pool:    g.Pool,

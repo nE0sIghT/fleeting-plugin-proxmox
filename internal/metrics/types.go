@@ -9,17 +9,27 @@ type Identity struct {
 }
 
 type Snapshot struct {
-	Version           int               `json:"version"`
-	Identity          Identity          `json:"identity"`
-	TimestampUnix     int64             `json:"timestamp_unix"`
-	Up                bool              `json:"up"`
-	LastScrapeSuccess bool              `json:"last_scrape_success"`
-	LastError         string            `json:"last_error,omitempty"`
-	Instances         map[string]int    `json:"instances,omitempty"`
-	PendingInstances  int               `json:"pending_instances"`
-	Nodes             []NodeSnapshot    `json:"nodes,omitempty"`
-	Storages          []StorageSnapshot `json:"storages,omitempty"`
-	ProblemEvents     []ProblemEvent    `json:"problem_events,omitempty"`
+	Type              string             `json:"type,omitempty"`
+	Session           string             `json:"session,omitempty"`
+	ControlEpoch      string             `json:"control_epoch,omitempty"`
+	ControlRevision   uint64             `json:"control_revision,omitempty"`
+	ConfiguredNodes   []string           `json:"configured_nodes,omitempty"`
+	NodePending       map[string]int     `json:"node_pending,omitempty"`
+	NodeTemplates     map[string]int     `json:"node_templates,omitempty"`
+	NodeErrors        map[string]string  `json:"node_errors,omitempty"`
+	InstanceDetails   []InstanceSnapshot `json:"instance_details,omitempty"`
+	Version           int                `json:"version"`
+	Identity          Identity           `json:"identity"`
+	TimestampUnix     int64              `json:"timestamp_unix"`
+	Up                bool               `json:"up"`
+	LastScrapeSuccess bool               `json:"last_scrape_success"`
+	LastError         string             `json:"last_error,omitempty"`
+	Instances         map[string]int     `json:"instances,omitempty"`
+	PendingInstances  int                `json:"pending_instances"`
+	Nodes             []NodeSnapshot     `json:"nodes,omitempty"`
+	Storages          []StorageSnapshot  `json:"storages,omitempty"`
+	ObservedStorages  []StorageSnapshot  `json:"observed_storages,omitempty"`
+	ProblemEvents     []ProblemEvent     `json:"problem_events,omitempty"`
 }
 
 type ProblemState string
@@ -55,22 +65,26 @@ func (p ProblemEvent) Key() string {
 }
 
 type NodeSnapshot struct {
-	Node                              string  `json:"node"`
-	TotalCPUCores                     float64 `json:"total_cpu_cores"`
-	RuntimeFreeCPUCores               float64 `json:"runtime_free_cpu_cores"`
-	ReservedCPUCores                  float64 `json:"reserved_cpu_cores"`
-	AllocatedCPUCores                 float64 `json:"allocated_cpu_cores"`
-	CPUAllocationLimitCores           float64 `json:"cpu_allocation_limit_cores"`
-	PhysicalAllocationFreeCPUCores    float64 `json:"physical_allocation_free_cpu_cores"`
-	TotalMemoryBytes                  float64 `json:"total_memory_bytes"`
-	RuntimeFreeMemoryBytes            float64 `json:"runtime_free_memory_bytes"`
-	ReservedMemoryBytes               float64 `json:"reserved_memory_bytes"`
-	AllocatedMemoryBytes              float64 `json:"allocated_memory_bytes"`
-	MemoryAllocationLimitBytes        float64 `json:"memory_allocation_limit_bytes"`
-	PhysicalAllocationFreeMemoryBytes float64 `json:"physical_allocation_free_memory_bytes"`
+	PlacementFailures                 []string `json:"placement_failures,omitempty"`
+	Node                              string   `json:"node"`
+	TotalCPUCores                     float64  `json:"total_cpu_cores"`
+	RuntimeFreeCPUCores               float64  `json:"runtime_free_cpu_cores"`
+	ReservedCPUCores                  float64  `json:"reserved_cpu_cores"`
+	AllocatedCPUCores                 float64  `json:"allocated_cpu_cores"`
+	CPUAllocationLimitCores           float64  `json:"cpu_allocation_limit_cores"`
+	PhysicalAllocationFreeCPUCores    float64  `json:"physical_allocation_free_cpu_cores"`
+	TotalMemoryBytes                  float64  `json:"total_memory_bytes"`
+	RuntimeFreeMemoryBytes            float64  `json:"runtime_free_memory_bytes"`
+	ReservedMemoryBytes               float64  `json:"reserved_memory_bytes"`
+	AllocatedMemoryBytes              float64  `json:"allocated_memory_bytes"`
+	MemoryAllocationLimitBytes        float64  `json:"memory_allocation_limit_bytes"`
+	PhysicalAllocationFreeMemoryBytes float64  `json:"physical_allocation_free_memory_bytes"`
 }
 
 type StorageSnapshot struct {
+	Status        string  `json:"status,omitempty"`
+	Eligible      bool    `json:"eligible"`
+	Shared        bool    `json:"shared"`
 	Node          string  `json:"node"`
 	Storage       string  `json:"storage"`
 	TotalBytes    float64 `json:"total_bytes"`

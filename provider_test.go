@@ -784,6 +784,8 @@ func TestCloneStorageCollisionQuarantinesPlacementAndUsesNextVMID(t *testing.T) 
 	require.NoError(t, err)
 
 	problemEvents := make(chan metrics.ProblemEvent, 10)
+	controlReady := make(chan struct{}, 1)
+	var metricsWorkers sync.WaitGroup
 	metricsDone := make(chan struct{})
 	go func() {
 		defer close(metricsDone)
@@ -792,23 +794,41 @@ func TestCloneStorageCollisionQuarantinesPlacementAndUsesNextVMID(t *testing.T) 
 			if acceptErr != nil {
 				return
 			}
-			var snapshot metrics.Snapshot
-			decodeErr := json.NewDecoder(conn).Decode(&snapshot)
-			_ = conn.Close()
-			if decodeErr != nil {
-				continue
-			}
-			for _, event := range snapshot.ProblemEvents {
-				select {
-				case problemEvents <- event:
-				default:
+			metricsWorkers.Add(1)
+			go func() {
+				defer metricsWorkers.Done()
+				defer conn.Close()
+				decoder := json.NewDecoder(conn)
+				for {
+					var snapshot metrics.Snapshot
+					if err := decoder.Decode(&snapshot); err != nil {
+						return
+					}
+					if snapshot.Type == "hello" {
+						if err := json.NewEncoder(conn).Encode(map[string]any{"type": "state", "state": metrics.DrainState{Epoch: "test"}}); err != nil {
+							return
+						}
+					}
+					if snapshot.Type == "ack" {
+						select {
+						case controlReady <- struct{}{}:
+						default:
+						}
+					}
+					for _, event := range snapshot.ProblemEvents {
+						select {
+						case problemEvents <- event:
+						default:
+						}
+					}
 				}
-			}
+			}()
 		}
 	}()
 	defer func() {
 		_ = metricsListener.Close()
 		<-metricsDone
+		metricsWorkers.Wait()
 	}()
 
 	server := httptest.NewServer(mock.handler(t))
@@ -836,6 +856,11 @@ func TestCloneStorageCollisionQuarantinesPlacementAndUsesNextVMID(t *testing.T) 
 	defer func() {
 		require.NoError(t, group.Shutdown(context.Background()))
 	}()
+	select {
+	case <-controlReady:
+	case <-time.After(time.Second):
+		t.Fatal("control was not synchronized")
+	}
 
 	count, err := group.Increase(context.Background(), 1)
 	require.NoError(t, err)

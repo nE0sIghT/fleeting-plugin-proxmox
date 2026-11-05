@@ -20,12 +20,14 @@ const (
 )
 
 type ReporterConfig struct {
-	SocketPath string
-	Interval   time.Duration
-	Identity   Identity
-	Collect    func(context.Context) (Snapshot, error)
-	Info       func(string, ...any)
-	Warn       func(string, ...any)
+	ControlNodes []string
+	ApplyControl func(DrainState)
+	SocketPath   string
+	Interval     time.Duration
+	Identity     Identity
+	Collect      func(context.Context) (Snapshot, error)
+	Info         func(string, ...any)
+	Warn         func(string, ...any)
 }
 
 type Reporter struct {
@@ -86,7 +88,12 @@ func (r *Reporter) Shutdown(ctx context.Context) {
 
 func (r *Reporter) run() {
 	for {
-		err := r.publish(r.ctx)
+		var err error
+		if r.cfg.ApplyControl != nil {
+			err = r.stream(r.ctx)
+		} else {
+			err = r.publish(r.ctx)
+		}
 		r.recordSendResult(err)
 
 		wait := r.cfg.Interval

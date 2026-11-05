@@ -3,15 +3,65 @@ package instancegroup
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/stretchr/testify/require"
 
+	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/limiter"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/metrics"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/proxmoxclient"
 	"gitlab.com/gitlab-org/fleeting/plugins/proxmox/internal/scheduler"
 )
+
+func TestQueuedProvisionDoesNotCloneOrRollbackAfterDrain(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unexpected request", 500)
+	}))
+	defer server.Close()
+	client, err := proxmoxclient.New(proxmoxclient.Config{BaseURL: server.URL, TokenID: "test", TokenSecret: "secret"})
+	require.NoError(t, err)
+	cloneLimiter := limiter.New(1)
+	occupied := make(chan struct{})
+	release := make(chan struct{})
+	limiterDone := make(chan struct{})
+	go func() {
+		defer close(limiterDone)
+		_ = cloneLimiter.Do(context.Background(), func(context.Context) error { close(occupied); <-release; return nil })
+	}()
+	<-occupied
+	group := New(client, hclog.NewNullLogger(), Config{ClusterName: "lab", NetworkMode: "dhcp", CloneTimeout: time.Second}, nil, cloneLimiter, limiter.New(1), limiter.New(1), nil)
+	group.EnableControl()
+	group.ApplyControl(metrics.DrainState{})
+	result := make(chan error, 1)
+	go func() {
+		_, err := group.provisionOne(context.Background(), provisionPlan{Node: "node1", VMID: 5000})
+		result <- err
+	}()
+	require.Eventually(t, func() bool {
+		group.mu.Lock()
+		defer group.mu.Unlock()
+		_, ok := group.transient["node1/5000"]
+		return ok
+	}, time.Second, time.Millisecond)
+	group.ApplyControl(metrics.DrainState{Nodes: []metrics.NodeRef{{Cluster: "lab", Node: "node1"}}})
+	close(release)
+	<-limiterDone
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, metrics.ErrPlacementPaused)
+	case <-time.After(time.Second):
+		t.Fatal("queued provisioning did not finish")
+	}
+	require.Zero(t, requests.Load(), "a paused queued plan must neither clone nor rollback an existing VMID")
+}
 
 func TestReservePlannedResourcesSpreadsAcrossNodes(t *testing.T) {
 	t.Parallel()

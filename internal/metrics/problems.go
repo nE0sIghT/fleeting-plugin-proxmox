@@ -335,28 +335,32 @@ func (e *Exporter) refreshExceptionsFile(now time.Time) error {
 
 func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create exceptions directory: %w", err)
+		return fmt.Errorf("create output directory: %w", err)
 	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".exceptions-*")
+	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
 	if err != nil {
-		return fmt.Errorf("create temporary exceptions file: %w", err)
+		return fmt.Errorf("create temporary output file: %w", err)
 	}
 	tempPath := file.Name()
 	defer os.Remove(tempPath)
 
 	if err := file.Chmod(mode); err != nil {
 		_ = file.Close()
-		return fmt.Errorf("chmod temporary exceptions file: %w", err)
+		return fmt.Errorf("chmod temporary output file: %w", err)
 	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
-		return fmt.Errorf("write temporary exceptions file: %w", err)
+		return fmt.Errorf("write temporary output file: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync state file: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("close temporary exceptions file: %w", err)
+		return fmt.Errorf("close temporary output file: %w", err)
 	}
 	if err := os.Rename(tempPath, path); err != nil {
-		return fmt.Errorf("replace exceptions file: %w", err)
+		return fmt.Errorf("replace output file: %w", err)
 	}
 	return nil
 }
