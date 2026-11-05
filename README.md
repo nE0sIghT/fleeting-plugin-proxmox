@@ -37,6 +37,13 @@ This produces:
 dist/fleeting-plugin-proxmox
 ```
 
+To cross-compile both Linux architectures, run `make all` (or `make -j2 all` for parallel builds):
+
+```text
+dist/fleeting-plugin-proxmox-linux-amd64
+dist/fleeting-plugin-proxmox-linux-arm64
+```
+
 To remove build artifacts:
 
 ```bash

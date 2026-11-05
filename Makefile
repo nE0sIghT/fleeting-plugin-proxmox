@@ -14,11 +14,19 @@ LDFLAGS ?= -s -w \
 	-X 'gitlab.com/gitlab-org/fleeting/plugins/proxmox.REFERENCE=$(REFERENCE)' \
 	-X 'gitlab.com/gitlab-org/fleeting/plugins/proxmox.BUILT=$(BUILT)'
 
-.PHONY: build test fmt clean
+.PHONY: all build build-amd64 build-arm64 test fmt clean
 
 build:
 	mkdir -p $(dir $(BINARY))
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/fleeting-plugin-proxmox
+
+all: build-amd64 build-arm64
+
+build-amd64:
+	$(MAKE) build GOOS=linux GOARCH=amd64 BINARY=dist/fleeting-plugin-proxmox-linux-amd64
+
+build-arm64:
+	$(MAKE) build GOOS=linux GOARCH=arm64 BINARY=dist/fleeting-plugin-proxmox-linux-arm64
 
 test:
 	$(GO) test ./...
