@@ -89,13 +89,18 @@ func runTUI(parent context.Context, opts Options, screen tcell.Screen) error {
 	renderDetail := func() {
 		filter := opts
 		row, _ := nodes.GetSelection()
-		if row > 0 && row <= len(rows) {
+		if view == "problems" {
+			filter = Options{}
+		} else if row > 0 && row <= len(rows) {
 			filter.Cluster = rows[row-1].Cluster
 			filter.Node = rows[row-1].Node
 		}
 		var out bytes.Buffer
 		Render(&out, view, status, filter)
 		detail.SetTitle(" " + view + " ")
+		if view == "problems" {
+			detail.SetTitle(" problems (all local fleets) ")
+		}
 		detail.SetText(strings.ReplaceAll(out.String(), "\t", "  "))
 	}
 	render := func() {
@@ -139,7 +144,7 @@ func runTUI(parent context.Context, opts Options, screen tcell.Screen) error {
 			}
 			nodes.Select(row, 0)
 		}
-		message.SetText(fmt.Sprintf("%s | fleets %d | revision %d | selected %d\n%s", status.Problems.Status, len(status.Fleets), status.State.Revision, len(selected), safe(commandMessage)))
+		message.SetText(fmt.Sprintf("%s | active %d | recent %d | fleets %d | revision %d | selected %d\n%s", status.Problems.Status, status.Problems.Active, status.Problems.Recent, len(status.Fleets), status.State.Revision, len(selected), safe(commandMessage)))
 		renderDetail()
 	}
 	nodes.SetSelectionChangedFunc(func(int, int) { renderDetail() })

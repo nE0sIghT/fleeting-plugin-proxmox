@@ -127,7 +127,10 @@ func TestTUIRendersNodesAndSendsDrain(t *testing.T) {
 					drained.Store(true)
 				}
 				_ = json.NewEncoder(conn).Encode(metrics.ControlResponse{Status: metrics.ControlStatus{
-					GeneratedUnix: time.Now().Unix(), Problems: metrics.ProblemStatus{Status: "OK"},
+					GeneratedUnix: time.Now().Unix(), Problems: metrics.ProblemStatus{Status: "DEGRADED", Recent: 2, Problems: []metrics.ProblemView{
+						{State: metrics.ProblemRecent, Cluster: "cluster02", Pool: "ci", Group: "other", Node: "node06", Code: "clone_failed", Message: "storage lock timeout"},
+						{State: metrics.ProblemRecent, Cluster: "cluster01", Pool: "ci", Group: "one", Code: "reconcile_failed", Message: "API unavailable"},
+					}},
 					Nodes: []metrics.DrainStatus{{NodeRef: metrics.NodeRef{Cluster: "cluster01", Node: "node05"}, Drained: drained.Load(), Applied: true}},
 				}})
 			}
@@ -142,6 +145,13 @@ func TestTUIRendersNodesAndSendsDrain(t *testing.T) {
 	go func() { done <- runTUI(ctx, Options{Socket: socket, Timeout: time.Second}, screen) }()
 	content := screen.Text
 	require.Eventually(t, func() bool { return strings.Contains(content(), "node05") }, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return strings.Contains(content(), "active 0 | recent 2") }, time.Second, 10*time.Millisecond)
+	screen.SetSize(160, 40)
+	_ = screen.PostEvent(tcell.NewEventResize(160, 40))
+	_ = screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, '4', tcell.ModNone))
+	require.Eventually(t, func() bool {
+		return strings.Contains(content(), "clone_failed") && strings.Contains(content(), "reconcile_failed")
+	}, time.Second, 10*time.Millisecond)
 	screen.SetSize(60, 20)
 	_ = screen.PostEvent(tcell.NewEventResize(60, 20))
 	_ = screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, ' ', tcell.ModNone))
