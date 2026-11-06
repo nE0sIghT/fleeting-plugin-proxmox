@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -127,6 +128,25 @@ func TestIncreaseIgnoresNonPositiveDelta(t *testing.T) {
 	count, err = group.Increase(context.Background(), -1)
 	require.NoError(t, err)
 	require.Zero(t, count)
+}
+
+func TestCanceledInitDoesNotReportProblem(t *testing.T) {
+	t.Parallel()
+	socketPath := filepath.Join(t.TempDir(), "metrics.sock")
+	listener, err := net.Listen("unix", socketPath)
+	require.NoError(t, err)
+	defer listener.Close()
+	group := &InstanceGroup{metricsReporter: metrics.NewReporter(metrics.ReporterConfig{SocketPath: socketPath, Identity: metrics.Identity{Cluster: "lab", Pool: "ci", Group: "runner"}})}
+	canceled := fmt.Errorf("verify pool: %w", &url.Error{Op: "Get", URL: "https://pve.example:8006/api2/json/pools/ci", Err: context.Canceled})
+	_, err = group.failInit(canceled)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, group.metricsReporter)
+	require.NoError(t, listener.(*net.UnixListener).SetDeadline(time.Now().Add(50*time.Millisecond)))
+	conn, err := listener.Accept()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	require.Error(t, err, "canceled initialization must not publish init_failed or reporter_offline")
 }
 
 func TestConfigValidationFailureReportsInitProblem(t *testing.T) {

@@ -198,6 +198,10 @@ func (g *InstanceGroup) configureMetricsReporter(interval time.Duration) {
 }
 
 func (g *InstanceGroup) failInit(err error) (provider.ProviderInfo, error) {
+	if errors.Is(err, context.Canceled) {
+		g.metricsReporter = nil
+		return provider.ProviderInfo{}, err
+	}
 	if g.metricsReporter != nil {
 		reporter := g.metricsReporter
 		reporter.ReportProblem(metrics.ProblemEvent{
