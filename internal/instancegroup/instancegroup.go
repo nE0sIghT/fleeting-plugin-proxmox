@@ -1732,6 +1732,13 @@ func (g *Group) safeDestroyManagedVM(ctx context.Context, instance ManagedInstan
 }
 
 func (g *Group) safeDestroyProvisioningVM(ctx context.Context, node string, vmid int, expectedName string) error {
+	available, err := g.client.VMIDAvailable(ctx, vmid)
+	if err != nil {
+		return fmt.Errorf("check VMID %d before cleanup: %w", vmid, err)
+	}
+	if available {
+		return nil
+	}
 	config, found, err := g.lookupVMConfig(ctx, node, vmid)
 	if err != nil {
 		return err

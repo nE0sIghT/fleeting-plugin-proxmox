@@ -199,6 +199,16 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 		defer m.mu.Unlock()
 
 		switch {
+		case r.URL.Path == "/api2/json/cluster/nextid":
+			vmid, err := strconv.Atoi(r.URL.Query().Get("vmid"))
+			require.NoError(t, err)
+			if _, exists := m.vms[vmid]; exists || vmid == m.template.VMID {
+				w.WriteHeader(http.StatusBadRequest)
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"data": nil, "errors": map[string]string{"vmid": fmt.Sprintf("VM %d already exists", vmid)}}))
+			} else {
+				write(strconv.Itoa(vmid))
+			}
+			return
 		case r.URL.Path == "/api2/json/version":
 			write(map[string]any{"release": "8.2"})
 			return

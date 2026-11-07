@@ -21,6 +21,20 @@ import (
 
 var ErrNotFound = errors.New("resource not found")
 
+type APIError struct {
+	StatusCode int
+	Fields     map[string]string
+	details    string
+}
+
+func (e *APIError) Error() string { return "proxmox api error: " + e.details }
+func (e *APIError) Unwrap() error {
+	if e.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	return nil
+}
+
 type Config struct {
 	BaseURL            string
 	TokenID            string
@@ -632,6 +646,22 @@ func (c *Client) GetTaskStatus(ctx context.Context, node, upid string) (TaskStat
 	return out, err
 }
 
+func (c *Client) VMIDAvailable(ctx context.Context, vmid int) (bool, error) {
+	var id laxInt
+	err := c.getWithQuery(ctx, "/cluster/nextid", url.Values{"vmid": {strconv.Itoa(vmid)}}, &id)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest && strings.TrimSpace(apiErr.Fields["vmid"]) == fmt.Sprintf("VM %d already exists", vmid) {
+			return false, nil
+		}
+		return false, err
+	}
+	if vmid <= 0 || int(id) != vmid {
+		return false, fmt.Errorf("unexpected nextid response: requested %d, received %d", vmid, id)
+	}
+	return true, nil
+}
+
 func (c *Client) WaitForTask(ctx context.Context, node, upid string, pollInterval time.Duration) error {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -753,10 +783,11 @@ func decodeResponse(resp *http.Response, out any) error {
 		return err
 	}
 	if resp.StatusCode >= 400 {
-		if resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("%w: %s", ErrNotFound, proxmoxAPIErrorDetails(resp, body))
+		var payload struct {
+			Errors map[string]string `json:"errors"`
 		}
-		return fmt.Errorf("proxmox api error: %s", proxmoxAPIErrorDetails(resp, body))
+		_ = json.Unmarshal(body, &payload)
+		return &APIError{StatusCode: resp.StatusCode, Fields: payload.Errors, details: proxmoxAPIErrorDetails(resp, body)}
 	}
 
 	var raw envelope[json.RawMessage]
