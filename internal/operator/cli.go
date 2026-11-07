@@ -191,7 +191,7 @@ func matches(opts Options, cluster, node string) bool {
 func Render(out io.Writer, action string, status metrics.ControlStatus, opts Options) {
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	defer w.Flush()
-	fmt.Fprintf(w, "LOCAL  %s  updated=%s  revision=%d\n", status.Problems.Status, time.Unix(status.GeneratedUnix, 0).UTC().Format(time.RFC3339), status.State.Revision)
+	fmt.Fprintf(w, "LOCAL  %s  current_errors=%d  recent_errors=%d  updated=%s  revision=%d\n", status.Problems.Status, status.Problems.Active, status.Problems.Recent, time.Unix(status.GeneratedUnix, 0).UTC().Format(time.RFC3339), status.State.Revision)
 	if action == "status" || action == "nodes" || action == "drain" || action == "undrain" {
 		fmt.Fprintln(w, "CLUSTER\tNODE\tPLACEMENT\tCONFIRMED\tEMPTY\tVMs\tPENDING\tTEMPLATES")
 		for _, n := range status.Nodes {
@@ -280,7 +280,11 @@ func Render(out io.Writer, action string, status metrics.ControlStatus, opts Opt
 			if !matches(opts, p.Cluster, p.Node) {
 				continue
 			}
-			fmt.Fprintf(w, "%s\t%s/%s/%s\t%s\t%s\t%s\t%d\t%s\t%s\n", p.State, safe(p.Cluster), safe(p.Pool), safe(p.Group), safe(p.Node), safe(p.Storage), safe(p.Code), p.Occurrences, time.Unix(p.LastSeenUnix, 0).UTC().Format(time.RFC3339), safe(p.Message))
+			state := "recent_error"
+			if p.State == metrics.ProblemActive {
+				state = "current_error"
+			}
+			fmt.Fprintf(w, "%s\t%s/%s/%s\t%s\t%s\t%s\t%d\t%s\t%s\n", state, safe(p.Cluster), safe(p.Pool), safe(p.Group), safe(p.Node), safe(p.Storage), safe(p.Code), p.Occurrences, time.Unix(p.LastSeenUnix, 0).UTC().Format(time.RFC3339), safe(p.Message))
 		}
 	}
 }

@@ -32,8 +32,8 @@ type ProblemStatus struct {
 	Status      string        `json:"status"`
 	GeneratedAt string        `json:"generated_at"`
 	Fleets      int           `json:"fleets"`
-	Active      int           `json:"active"`
-	Recent      int           `json:"recent"`
+	Active      int           `json:"current_errors"`
+	Recent      int           `json:"recent_errors"`
 	Problems    []ProblemView `json:"problems,omitempty"`
 }
 
@@ -194,8 +194,6 @@ func (e *Exporter) problemStatus(now time.Time) ProblemStatus {
 	switch {
 	case status.Active > 0:
 		status.Status = "ERROR"
-	case status.Recent > 0:
-		status.Status = "DEGRADED"
 	case status.Fleets > 0:
 		status.Status = "OK"
 	}
@@ -265,13 +263,17 @@ func renderProblemText(status ProblemStatus) []byte {
 	var out bytes.Buffer
 	fmt.Fprintf(&out, "STATUS: %s\n", status.Status)
 	fmt.Fprintf(&out, "updated: %s\n", status.GeneratedAt)
-	fmt.Fprintf(&out, "fleets: %d, active: %d, recent: %d\n", status.Fleets, status.Active, status.Recent)
+	fmt.Fprintf(&out, "fleets: %d, current_errors: %d, recent_errors: %d\n", status.Fleets, status.Active, status.Recent)
 
 	currentState := ProblemState("")
 	for _, problem := range status.Problems {
 		if problem.State != currentState {
 			currentState = problem.State
-			fmt.Fprintf(&out, "\n%s\n", strings.ToUpper(string(currentState)))
+			heading := "RECENT ERRORS"
+			if currentState == ProblemActive {
+				heading = "CURRENT ERRORS"
+			}
+			fmt.Fprintf(&out, "\n%s\n", heading)
 		}
 		fmt.Fprintf(
 			&out,

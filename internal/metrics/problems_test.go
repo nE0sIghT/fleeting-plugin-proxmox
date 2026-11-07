@@ -63,7 +63,7 @@ func TestProblemAggregationLifecycle(t *testing.T) {
 	require.Equal(t, uint64(2), status.Problems[0].Occurrences)
 
 	status = exporter.problemStatus(now.Add(31 * time.Minute))
-	require.Equal(t, "DEGRADED", status.Status)
+	require.Equal(t, "OK", status.Status)
 	require.Zero(t, status.Active)
 	require.Equal(t, 1, status.Recent)
 	require.Equal(t, ProblemRecent, status.Problems[0].State)
@@ -104,7 +104,7 @@ func TestResolvedProblemRemainsRecentUntilRetention(t *testing.T) {
 	}}, now.Add(time.Minute))
 
 	status := exporter.problemStatus(now.Add(time.Minute))
-	require.Equal(t, "DEGRADED", status.Status)
+	require.Equal(t, "OK", status.Status)
 	require.Zero(t, status.Active)
 	require.Equal(t, 1, status.Recent)
 	require.Equal(t, "API unavailable", status.Problems[0].Message)
@@ -140,7 +140,9 @@ func TestExceptionsFileIsHumanReadableAndAtomic(t *testing.T) {
 	require.NoError(t, exporter.refreshExceptionsFile(now))
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Contains(t, string(data), "STATUS: DEGRADED")
+	require.Contains(t, string(data), "STATUS: OK")
+	require.Contains(t, string(data), "current_errors: 0, recent_errors: 1")
+	require.Contains(t, string(data), "RECENT ERRORS")
 	require.Contains(t, string(data), "prod  ci  arm64  start_failed")
 	require.Contains(t, string(data), `last_error="guest agent not ready"`)
 
@@ -185,8 +187,32 @@ func TestProblemHTTPHandlers(t *testing.T) {
 	jsonResponse := httptest.NewRecorder()
 	exporter.handleProblemsJSON(jsonResponse, httptest.NewRequest("GET", "/problems.json", nil))
 	require.Equal(t, 200, jsonResponse.Code)
+	require.Contains(t, jsonResponse.Body.String(), `"current_errors": 0`)
+	require.Contains(t, jsonResponse.Body.String(), `"recent_errors": 0`)
 	var status ProblemStatus
 	require.NoError(t, json.Unmarshal(jsonResponse.Body.Bytes(), &status))
 	require.Equal(t, "OK", status.Status)
 	require.Equal(t, 1, status.Fleets)
+}
+
+func TestReporterFailuresStillSetErrorWithRecentHistory(t *testing.T) {
+	t.Parallel()
+	for _, offline := range []bool{false, true} {
+		name := "stale"
+		if offline {
+			name = "offline"
+		}
+		t.Run(name, func(t *testing.T) {
+			now := time.Now()
+			exporter := NewExporter(ExporterConfig{StaleAfter: time.Minute})
+			identity := Identity{Cluster: "prod", Pool: "ci", Group: "arm64"}
+			exporter.snapshots[identity.Key()] = storedSnapshot{Snapshot: Snapshot{Identity: identity, Up: !offline}, ReceivedUnix: now.Add(-2 * time.Minute).Unix()}
+			exporter.applyProblemEventsLocked(identity, []ProblemEvent{{ID: "recent", Code: "clone_failed", State: ProblemRecent, TimestampUnix: now.Unix()}}, now)
+			status := exporter.problemStatus(now)
+			require.Equal(t, "ERROR", status.Status)
+			require.Equal(t, 1, status.Active)
+			require.Equal(t, 1, status.Recent)
+			require.Contains(t, string(renderProblemText(status)), "CURRENT ERRORS")
+		})
+	}
 }

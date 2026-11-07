@@ -144,7 +144,7 @@ func runTUI(parent context.Context, opts Options, screen tcell.Screen) error {
 			}
 			nodes.Select(row, 0)
 		}
-		message.SetText(fmt.Sprintf("%s | active %d | recent %d | fleets %d | revision %d | selected %d\n%s", status.Problems.Status, status.Problems.Active, status.Problems.Recent, len(status.Fleets), status.State.Revision, len(selected), safe(commandMessage)))
+		message.SetText(fmt.Sprintf("%s | errors %d | recent errors %d | fleets %d | revision %d | selected %d\n%s", status.Problems.Status, status.Problems.Active, status.Problems.Recent, len(status.Fleets), status.State.Revision, len(selected), safe(commandMessage)))
 		renderDetail()
 	}
 	nodes.SetSelectionChangedFunc(func(int, int) { renderDetail() })

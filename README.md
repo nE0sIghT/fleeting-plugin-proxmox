@@ -360,11 +360,12 @@ curl http://127.0.0.1:9252/problems.json
 The summary status is:
 
 - `UNKNOWN` until the exporter receives its first fleet snapshot
-- `OK` when reporters are current and no retained problems exist
-- `DEGRADED` when recent or resolved errors remain within the retention window
+- `OK` when reporters are current and no current errors exist, even if recent errors remain in history
 - `ERROR` when an active problem exists or a reporter is stale/offline
 
 Repeated failures are grouped by fleet, code, phase, node, and storage. VMID, operation ID, and the latest error remain diagnostic fields and do not create a separate problem for every failed VM. Recent and resolved problems are retained for 24 hours by default. Exporter flags `--problem-retention`, `--problem-limit`, and `--exceptions-file` control this behavior.
+
+Text summaries and JSON expose `current_errors` and `recent_errors` counters. Recent errors do not affect the current health status. The TUI displays these as `errors` and `recent errors`; its Problems view includes all local fleets. Existing Prometheus metric names, including `fleeting_proxmox_problem_active` and `fleeting_proxmox_problem_recent`, remain unchanged.
 
 Prometheus can scrape the exporter directly:
 
