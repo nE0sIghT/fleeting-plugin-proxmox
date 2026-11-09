@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -60,6 +61,12 @@ type mockProxmox struct {
 	rootFSTotal              int64
 	storages                 []map[string]any
 	storageCfgs              map[string]map[string]any
+}
+
+func (m *mockProxmox) snapshotVMs() map[int]mockVM {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return maps.Clone(m.vms)
 }
 
 func newMockProxmox() *mockProxmox {
@@ -535,10 +542,11 @@ func TestProviderLifecycle(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tc.wantIP, connectInfo.InternalAddr)
 			require.Equal(t, "ubuntu", connectInfo.Username)
-			require.Equal(t, "ceph-vm", mock.vms[5000].Storage)
-			require.Equal(t, int64(4096), mock.vms[5000].MemoryMB)
-			require.Equal(t, 4, mock.vms[5000].CPUCores)
-			require.Equal(t, int64(20*1024), mock.vms[5000].DiskMB)
+			vm := mock.snapshotVMs()[5000]
+			require.Equal(t, "ceph-vm", vm.Storage)
+			require.Equal(t, int64(4096), vm.MemoryMB)
+			require.Equal(t, 4, vm.CPUCores)
+			require.Equal(t, int64(20*1024), vm.DiskMB)
 
 			deleted, err := group.Decrease(context.Background(), ids)
 			require.NoError(t, err)
@@ -590,11 +598,11 @@ func TestCloneRollbackDoesNotDeleteForeignVM(t *testing.T) {
 	require.Equal(t, 1, count)
 
 	require.Eventually(t, func() bool {
-		_, exists := mock.vms[5001]
+		_, exists := mock.snapshotVMs()[5001]
 		return !exists
 	}, 500*time.Millisecond, 25*time.Millisecond)
 
-	foreign, ok := mock.vms[5000]
+	foreign, ok := mock.snapshotVMs()[5000]
 	require.True(t, ok)
 	require.Equal(t, "foreign-vm", foreign.Name)
 	require.Equal(t, "foreign-pool", foreign.Pool)
@@ -641,7 +649,7 @@ func TestInitDeletesPreexistingStoppedManagedInstances(t *testing.T) {
 
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.NoError(t, err)
-	require.Empty(t, mock.vms)
+	require.Empty(t, mock.snapshotVMs())
 }
 
 func TestInitDeletesManagedInstancesOutsideStaticIPPool(t *testing.T) {
@@ -703,9 +711,10 @@ func TestInitDeletesManagedInstancesOutsideStaticIPPool(t *testing.T) {
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.NoError(t, err)
 
-	_, exists := mock.vms[5000]
+	vms := mock.snapshotVMs()
+	_, exists := vms[5000]
 	require.False(t, exists)
-	remaining, exists := mock.vms[5001]
+	remaining, exists := vms[5001]
 	require.True(t, exists)
 	require.Equal(t, "running", remaining.Status)
 
@@ -910,9 +919,7 @@ func TestCloneStorageCollisionQuarantinesPlacementAndUsesNextVMID(t *testing.T) 
 	require.Equal(t, 1, count)
 
 	require.Eventually(t, func() bool {
-		mock.mu.Lock()
-		defer mock.mu.Unlock()
-		vm, ok := mock.vms[5001]
+		vm, ok := mock.snapshotVMs()[5001]
 		return ok && vm.Status == "running"
 	}, 2*time.Second, 25*time.Millisecond)
 
@@ -970,7 +977,7 @@ func TestTargetStoragePlacementIgnoresNodeRootFS(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 	require.Eventually(t, func() bool {
-		return mock.vms[5000].Storage == "ceph-vm"
+		return mock.snapshotVMs()[5000].Storage == "ceph-vm"
 	}, 500*time.Millisecond, 25*time.Millisecond)
 }
 
@@ -1122,7 +1129,7 @@ func TestManagedTemplateStagingMigratesNonSharedCrossNodeSource(t *testing.T) {
 		require.NoError(t, group.Shutdown(context.Background()))
 	}()
 
-	vm, ok := mock.vms[510000]
+	vm, ok := mock.snapshotVMs()[510000]
 	require.True(t, ok)
 	require.Equal(t, "node2", vm.Node)
 	require.Equal(t, "fast-local", vm.Storage)
@@ -1184,7 +1191,7 @@ func TestManagedTemplateStagingCleansMigratedPartialOnConvertFailure(t *testing.
 	_, err := group.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "convert staged template node2/510000")
-	require.NotContains(t, mock.vms, 510000)
+	require.NotContains(t, mock.snapshotVMs(), 510000)
 }
 
 func TestManagedTemplateStagingDeletesPreexistingPartialBeforeReuse(t *testing.T) {
@@ -1255,7 +1262,7 @@ func TestManagedTemplateStagingDeletesPreexistingPartialBeforeReuse(t *testing.T
 		require.NoError(t, group.Shutdown(context.Background()))
 	}()
 
-	vm := mock.vms[510000]
+	vm := mock.snapshotVMs()[510000]
 	require.Equal(t, "node2", vm.Node)
 	require.Equal(t, 1, vm.Template)
 	require.Equal(t, "managed-by-fleeting-plugin-proxmox;managed-role-template-stage", vm.Tags)
@@ -1371,7 +1378,7 @@ func TestSharedTemplateFallbackUsesFullCloneOnSharedTemplateStorage(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 	require.Eventually(t, func() bool {
-		vm, ok := mock.vms[5000]
+		vm, ok := mock.snapshotVMs()[5000]
 		return ok && vm.Node == "node2" && vm.Storage == "ceph-vm"
 	}, 500*time.Millisecond, 25*time.Millisecond)
 }
@@ -1490,9 +1497,7 @@ func TestManagedTemplateReplacementReusesObsoleteVMID(t *testing.T) {
 		require.NoError(t, group.Shutdown(context.Background()))
 	}()
 
-	mock.mu.Lock()
-	replacement := mock.vms[510000]
-	mock.mu.Unlock()
+	replacement := mock.snapshotVMs()[510000]
 	require.Equal(t, "runner-template-node2-9000", replacement.Name)
 	require.Equal(t, 1, replacement.Template)
 	require.Equal(t, "Managed staged template for node node2 from source template 9000\nsource-template-version=2", replacement.Description)
@@ -1544,7 +1549,7 @@ func TestAutoCloneModeFallsBackToFullForUnsupportedStoragePluginType(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 	require.Eventually(t, func() bool {
-		return mock.vms[5000].Storage == "local-lvm"
+		return mock.snapshotVMs()[5000].Storage == "local-lvm"
 	}, 500*time.Millisecond, 25*time.Millisecond)
 }
 
@@ -1678,7 +1683,7 @@ func TestIncreaseSkipsUnavailableNodeAfterInit(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 	require.Eventually(t, func() bool {
-		return mock.vms[5000].Node == "node1"
+		return mock.snapshotVMs()[5000].Node == "node1"
 	}, 500*time.Millisecond, 25*time.Millisecond)
 }
 
