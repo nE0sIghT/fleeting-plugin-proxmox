@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -51,6 +52,67 @@ func getControlStatus(t *testing.T, cfg ExporterConfig) ControlStatus {
 	status, err := RequestControl(ctx, cfg.ControlSocket, ControlRequest{Action: "status"})
 	require.NoError(t, err)
 	return status
+}
+
+func TestExporterShutdownWaitsForSnapshotWrite(t *testing.T) {
+	t.Parallel()
+	cfg := testControlConfig(t)
+	exporter := NewExporter(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- exporter.Run(ctx) }()
+	locked := false
+	stopped := false
+	t.Cleanup(func() {
+		if locked {
+			exporter.fileMu.Unlock()
+		}
+		cancel()
+		if !stopped {
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Error("exporter did not stop")
+			}
+		}
+	})
+	require.Eventually(t, func() bool {
+		_, err := RequestControl(context.Background(), cfg.ControlSocket, ControlRequest{Action: "status"})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+	// Shutdown must also close accepted connections that have not sent a request yet.
+	pending, err := net.Dial("unix", cfg.ControlSocket)
+	require.NoError(t, err)
+	defer pending.Close()
+	exporter.fileMu.Lock()
+	locked = true
+	conn, err := net.Dial("unix", cfg.SocketPath)
+	require.NoError(t, err)
+	defer conn.Close()
+	identity := Identity{Cluster: "lab", Pool: "ci", Group: "runner"}
+	require.NoError(t, json.NewEncoder(conn).Encode(Snapshot{Version: 1, Identity: identity}))
+	require.Eventually(t, func() bool {
+		exporter.mu.Lock()
+		defer exporter.mu.Unlock()
+		_, ok := exporter.snapshots[identity.Key()]
+		return ok
+	}, time.Second, 10*time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		stopped = true
+		t.Fatalf("Run returned before the pending snapshot write finished: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	exporter.fileMu.Unlock()
+	locked = false
+	select {
+	case err := <-done:
+		stopped = true
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("exporter did not finish shutdown after the write was released")
+	}
 }
 
 func TestControlDrainReconnectAndRestart(t *testing.T) {

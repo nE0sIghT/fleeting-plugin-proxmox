@@ -144,7 +144,7 @@ func (e *Exporter) serveControl(listener net.Listener) error {
 			}
 			return err
 		}
-		go func() {
+		e.startConnHandler(conn, func(conn net.Conn) {
 			defer conn.Close()
 			_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 			var req ControlRequest
@@ -167,7 +167,7 @@ func (e *Exporter) serveControl(listener net.Listener) error {
 			}
 			response.Status = e.controlStatus(time.Now())
 			_ = json.NewEncoder(conn).Encode(response)
-		}()
+		})
 	}
 }
 
@@ -222,8 +222,14 @@ func (e *Exporter) handleSession(conn net.Conn, scanner *bufio.Scanner, hello Sn
 		e.controlMu.Unlock()
 	}()
 	done := make(chan struct{})
-	defer close(done)
+	writerDone := make(chan struct{})
+	defer func() {
+		close(done)
+		_ = conn.Close()
+		<-writerDone
+	}()
 	go func() {
+		defer close(writerDone)
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {

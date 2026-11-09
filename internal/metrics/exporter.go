@@ -40,6 +40,8 @@ type Exporter struct {
 	controlMu    sync.Mutex
 	controlState DrainState
 	sessions     map[string]*controlSession
+	connections  map[net.Conn]struct{}
+	handlers     sync.WaitGroup
 	stopping     bool
 	cfg          ExporterConfig
 
@@ -89,6 +91,7 @@ func NewExporter(cfg ExporterConfig) *Exporter {
 	return &Exporter{
 		controlState:      DrainState{Epoch: newProblemSource(), Nodes: []NodeRef{}},
 		sessions:          map[string]*controlSession{},
+		connections:       map[net.Conn]struct{}{},
 		cfg:               cfg,
 		snapshots:         map[string]storedSnapshot{},
 		problems:          map[string]storedProblem{},
@@ -128,32 +131,38 @@ func (e *Exporter) Run(ctx context.Context) error {
 	}
 
 	errs := make(chan error, 3)
-	go func() { errs <- e.serveControl(controlListener) }()
-	go func() {
-		errs <- e.serveUnix(listener)
-	}()
-	go func() {
+	var servers sync.WaitGroup
+	serve := func(fn func() error) {
+		servers.Add(1)
+		go func() {
+			defer servers.Done()
+			errs <- fn()
+		}()
+	}
+	serve(func() error { return e.serveControl(controlListener) })
+	serve(func() error { return e.serveUnix(listener) })
+	serve(func() error {
 		err := server.ListenAndServe()
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}
-		errs <- err
-	}()
+		return err
+	})
 	shutdown := func() {
 		_ = controlListener.Close()
 		_ = listener.Close()
 		e.controlMu.Lock()
 		e.stopping = true
-		for _, s := range e.sessions {
-			if s.conn != nil {
-				_ = s.conn.Close()
-			}
+		for conn := range e.connections {
+			_ = conn.Close()
 		}
 		e.controlMu.Unlock()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = listener.Close()
 		_ = server.Shutdown(shutdownCtx)
+		servers.Wait()
+		e.handlers.Wait()
 	}
 
 	ticker := time.NewTicker(15 * time.Second)
@@ -212,8 +221,30 @@ func (e *Exporter) serveUnix(listener net.Listener) error {
 			}
 			return err
 		}
-		go e.handleUnixConn(conn)
+		e.startConnHandler(conn, e.handleUnixConn)
 	}
+}
+
+func (e *Exporter) startConnHandler(conn net.Conn, handle func(net.Conn)) {
+	e.controlMu.Lock()
+	if e.stopping {
+		e.controlMu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	e.connections[conn] = struct{}{}
+	e.handlers.Add(1)
+	e.controlMu.Unlock()
+	go func() {
+		defer e.handlers.Done()
+		defer func() {
+			_ = conn.Close()
+			e.controlMu.Lock()
+			delete(e.connections, conn)
+			e.controlMu.Unlock()
+		}()
+		handle(conn)
+	}()
 }
 
 func (e *Exporter) handleUnixConn(conn net.Conn) {
