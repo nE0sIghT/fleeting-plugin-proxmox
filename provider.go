@@ -69,6 +69,8 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		TLSCAFile:          g.TLSCAFile,
 		InsecureSkipVerify: g.TLSInsecureSkipVerify,
 		AllowedServerNames: g.config().tlsServerNames(),
+		Info:               g.log.Info,
+		Warn:               g.log.Warn,
 	})
 	if err != nil {
 		return g.failInit(err)
@@ -198,6 +200,9 @@ func (g *InstanceGroup) configureMetricsReporter(interval time.Duration) {
 }
 
 func (g *InstanceGroup) failInit(err error) (provider.ProviderInfo, error) {
+	if g.client != nil {
+		g.client.Close()
+	}
 	if errors.Is(err, context.Canceled) {
 		g.metricsReporter = nil
 		return provider.ProviderInfo{}, err
@@ -283,6 +288,9 @@ func (g *InstanceGroup) Shutdown(ctx context.Context) error {
 	if g.metricsReporter != nil {
 		g.metricsReporter.Shutdown(ctx)
 		g.metricsReporter = nil
+	}
+	if g.client != nil {
+		g.client.Close()
 	}
 	return groupErr
 }

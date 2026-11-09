@@ -80,6 +80,23 @@ Unless stated otherwise, the options below belong to `[runners.autoscaler.plugin
 | `vmid_range` | string | yes |  | Dedicated VMID range in `start-end` form. |
 | `nodes` | string or list | yes |  | Placement allowlist. |
 
+When `api_url` uses a DNS name with multiple addresses, new TCP connections try
+alternative addresses if an address cannot be reached. DNS is refreshed every five
+minutes; lookup failures (including NXDOMAIN) and empty answers retain the last
+successful address list. If all known addresses fail, an early DNS refresh is
+attempted, with at least 30 seconds between lookups. Failed TCP addresses have a
+30-second cooldown; if all addresses are cooling down, they can be probed immediately.
+Connection establishment has a 15-second total budget, including DNS lookup (up to
+five seconds), and at most three seconds per address, shortened to share the remaining
+budget among candidates. Existing connections are not interrupted by DNS updates.
+
+HTTP Host and TLS SNI still use the hostname from `api_url`; certificate verification
+uses the TLS settings above, not the selected connection IP. DNS changes and TCP
+availability transitions are logged. HTTP errors, TLS failures, and requests already
+sent to an API node are not automatically retried by this mechanism. It does not
+restore VMs or tasks on an unavailable target node. No additional configuration is
+required; literal IP URLs bypass DNS caching.
+
 #### Templates and storage
 
 | Option | Type | Required | Default | Notes |

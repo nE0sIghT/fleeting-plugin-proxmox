@@ -42,12 +42,15 @@ type Config struct {
 	TLSCAFile          string
 	InsecureSkipVerify bool
 	AllowedServerNames []string
+	Info               func(string, ...any)
+	Warn               func(string, ...any)
 }
 
 type Client struct {
 	baseURL    *url.URL
 	httpClient *http.Client
 	authHeader string
+	dns        *dnsDialer
 }
 
 type envelope[T any] struct {
@@ -418,6 +421,7 @@ func New(cfg Config) (*Client, error) {
 		tlsConfig.RootCAs = pool
 	}
 	configureTLSVerification(baseURL, cfg, tlsConfig)
+	dns := newDNSDialer(baseURL.Hostname(), cfg.Info, cfg.Warn)
 
 	return &Client{
 		baseURL: baseURL,
@@ -425,10 +429,19 @@ func New(cfg Config) (*Client, error) {
 			Timeout: 60 * time.Second,
 			Transport: &http.Transport{
 				TLSClientConfig: tlsConfig,
+				DialContext:     dns.DialContext,
 			},
 		},
 		authHeader: fmt.Sprintf("PVEAPIToken=%s=%s", cfg.TokenID, cfg.TokenSecret),
+		dns:        dns,
 	}, nil
+}
+
+func (c *Client) Close() {
+	if c.dns != nil {
+		c.dns.close()
+	}
+	c.httpClient.CloseIdleConnections()
 }
 
 func configureTLSVerification(baseURL *url.URL, cfg Config, tlsConfig *tls.Config) {
