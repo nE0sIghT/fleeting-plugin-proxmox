@@ -57,7 +57,9 @@ type Config struct {
 	AgentTimeout                 time.Duration
 	AgentRequired                bool
 	GeneratedSSHPublicKey        string
+	GeneratedPassword            string
 	StaticSSHPublicKeys          []string
+	OS                           string
 	Scheduler                    *scheduler.Scheduler
 	MemoryAllocationLimitPercent int
 	CPUAllocationLimitPercent    int
@@ -1147,6 +1149,72 @@ func (g *Group) Decrease(ctx context.Context, ids []string) ([]string, error) {
 	return deleted, errors.Join(errs...)
 }
 
+func (g *Group) Suspend(ctx context.Context, ids []string) ([]string, error) {
+	var succeeded []string
+	var errs []error
+
+	for _, id := range ids {
+		node, vmid, err := parseInstanceID(id)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		g.setTransient(id, provider.StateSuspending)
+
+		upid, err := g.client.SuspendVM(ctx, node, vmid)
+		if err != nil {
+			g.clearTransient(id)
+			errs = append(errs, fmt.Errorf("suspend %s: %w", id, err))
+			continue
+		}
+
+		if err := g.client.WaitForTask(ctx, node, upid, g.cfg.TaskPollInterval); err != nil {
+			g.clearTransient(id)
+			errs = append(errs, fmt.Errorf("suspend %s: %w", id, err))
+			continue
+		}
+
+		g.clearTransient(id)
+		succeeded = append(succeeded, id)
+	}
+
+	return succeeded, errors.Join(errs...)
+}
+
+func (g *Group) Resume(ctx context.Context, ids []string) ([]string, error) {
+	var succeeded []string
+	var errs []error
+
+	for _, id := range ids {
+		node, vmid, err := parseInstanceID(id)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		g.setTransient(id, provider.StateResuming)
+
+		upid, err := g.client.ResumeVM(ctx, node, vmid)
+		if err != nil {
+			g.clearTransient(id)
+			errs = append(errs, fmt.Errorf("resume %s: %w", id, err))
+			continue
+		}
+
+		if err := g.client.WaitForTask(ctx, node, upid, g.cfg.TaskPollInterval); err != nil {
+			g.clearTransient(id)
+			errs = append(errs, fmt.Errorf("resume %s: %w", id, err))
+			continue
+		}
+
+		g.clearTransient(id)
+		succeeded = append(succeeded, id)
+	}
+
+	return succeeded, errors.Join(errs...)
+}
+
 func (g *Group) Shutdown(ctx context.Context) error {
 	if g.cancelRun != nil {
 		g.cancelRun()
@@ -1182,7 +1250,9 @@ func (g *Group) ConnectInfo(ctx context.Context, id string, settings provider.Se
 
 	info := provider.ConnectInfo{ConnectorConfig: settings.ConnectorConfig}
 	info.ID = id
-	info.OS = "linux"
+	if info.OS == "" {
+		info.OS = "linux"
+	}
 	if info.Arch == "" {
 		info.Arch = "amd64"
 	}
@@ -1190,7 +1260,7 @@ func (g *Group) ConnectInfo(ctx context.Context, id string, settings provider.Se
 		info.Protocol = provider.ProtocolSSH
 	}
 	if info.ProtocolPort == 0 {
-		info.ProtocolPort = provider.DefaultProtocolPorts[provider.ProtocolSSH]
+		info.ProtocolPort = provider.DefaultProtocolPorts[info.Protocol]
 	}
 	if info.Username == "" {
 		if g.cfg.CIUser != "" {
@@ -1409,9 +1479,16 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 	rollback := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), g.cfg.CloneTimeout)
 		defer cancel()
-		if err := g.safeDestroyProvisioningVM(cleanupCtx, plan.Node, plan.VMID, fmt.Sprintf("%s-%d", g.cfg.NamePrefix, plan.VMID)); err != nil {
-			log.Error("provisioning cleanup failed", "phase", "cleanup", "error", err)
-			g.reportPlanProblem(plan, "cleanup_failed", metrics.ProblemRecent, "cleanup", err, time.Time{})
+		// safeDestroyProvisioningVM is idempotent, so retry it through transient
+		// network/DNS blips: the outage that caused the failure often also blocks the
+		// cleanup that would otherwise strand the VM.
+		expectedName := fmt.Sprintf("%s-%d", g.cfg.NamePrefix, plan.VMID)
+		cleanupErr := proxmoxclient.Retry(cleanupCtx, proxmoxclient.NewRetryPolicy(g.cfg.CloneTimeout), func(ctx context.Context) error {
+			return g.safeDestroyProvisioningVM(ctx, plan.Node, plan.VMID, expectedName)
+		})
+		if cleanupErr != nil {
+			log.Error("provisioning cleanup failed", "phase", "cleanup", "error", cleanupErr)
+			g.reportPlanProblem(plan, "cleanup_failed", metrics.ProblemRecent, "cleanup", cleanupErr, time.Time{})
 		}
 		if g.pool != nil {
 			// Failed provisioning must not leave leases behind or put them into reuse cooldown.
@@ -1490,6 +1567,7 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 		MemoryMB:           g.cfg.VMMemoryMB,
 		CPUCores:           g.cfg.VMCPUCores,
 		CIUser:             g.cfg.CIUser,
+		CIPassword:         g.cfg.GeneratedPassword,
 		SSHKeys:            sshKeys,
 		NameServer:         strings.Join(g.cfg.NameServers, " "),
 		SearchDomain:       g.cfg.SearchDomain,
@@ -1537,14 +1615,19 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 		log.Info("start started", "phase", "start")
 		upid, err := g.client.StartVM(startCtx, plan.Node, plan.VMID)
 		if err != nil {
-			return err
+			return fmt.Errorf("StartVM API call: %w", err)
 		}
+		log.Info("start VM requested, waiting for task")
 		if err := g.client.WaitForTask(startCtx, plan.Node, upid, g.cfg.TaskPollInterval); err != nil {
-			return err
+			return fmt.Errorf("start task: %w", err)
 		}
+		log.Info("start task completed")
 		if g.cfg.AgentRequired {
-			_, err := g.discoverIPAddress(startCtx, plan.Node, plan.VMID, lease.IP, g.cfg.AgentTimeout)
-			return err
+			log.Info("waiting for guest agent")
+			if _, err := g.discoverIPAddress(startCtx, plan.Node, plan.VMID, lease.IP, g.cfg.AgentTimeout); err != nil {
+				return fmt.Errorf("guest agent discovery: %w", err)
+			}
+			log.Info("guest agent ready")
 		}
 		return nil
 	})
@@ -2844,7 +2927,9 @@ func mapState(status string) provider.State {
 	switch status {
 	case "running":
 		return provider.StateRunning
-	case "stopped", "paused":
+	case "paused":
+		return provider.StateSuspended
+	case "stopped":
 		return provider.StateCreating
 	default:
 		return provider.StateCreating
