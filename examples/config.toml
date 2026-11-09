@@ -22,6 +22,9 @@ check_interval = 3
     token_id = "gitlab-runner@pve!fleeting"
     token_secret = "REDACTED"
     tls_ca_file = "/etc/gitlab-runner/proxmox-ca.pem"
+    # Optional certificate names, independent of placement nodes.
+    # Omit to use nodes; set [] to verify only the api_url host.
+    # tls_allowed_server_names = ["pve01", "pve02", "pve03"]
     cluster_name = "prod-pve"
     pool = "gitlab-ci"
     template_vmids = [9000]

@@ -448,9 +448,9 @@ func configureTLSVerification(baseURL *url.URL, cfg Config, tlsConfig *tls.Confi
 	}
 }
 
-func tlsAllowedServerNames(apiHost string, nodeNames []string) []string {
-	seen := make(map[string]struct{}, len(nodeNames)+1)
-	names := make([]string, 0, len(nodeNames)+1)
+func tlsAllowedServerNames(apiHost string, serverNames []string) []string {
+	seen := make(map[string]struct{}, len(serverNames)+1)
+	names := make([]string, 0, len(serverNames)+1)
 	add := func(name string) {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -464,8 +464,8 @@ func tlsAllowedServerNames(apiHost string, nodeNames []string) []string {
 	}
 
 	add(apiHost)
-	for _, nodeName := range nodeNames {
-		add(nodeName)
+	for _, serverName := range serverNames {
+		add(serverName)
 	}
 	return names
 }
@@ -495,7 +495,7 @@ func verifyTLSConnection(state tls.ConnectionState, roots *x509.CertPool, allowe
 			return nil
 		}
 	}
-	return fmt.Errorf("tls: certificate is not valid for api_url host or configured nodes: allowed names %s", strings.Join(allowedNames, ", "))
+	return fmt.Errorf("tls: certificate is not valid for api_url host or configured server names: allowed names %s", strings.Join(allowedNames, ", "))
 }
 
 func (c *Client) GetVersion(ctx context.Context) (Version, error) {

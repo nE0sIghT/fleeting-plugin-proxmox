@@ -11,6 +11,35 @@ import (
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
 )
 
+func TestTLSAllowedServerNames(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+		want []string
+	}{
+		{"omitted uses nodes", `{"nodes":["pve01"]}`, []string{"pve01"}},
+		{"explicit list replaces nodes", `{"nodes":["pve01"],"tls_allowed_server_names":["pve02","pve03"]}`, []string{"pve02", "pve03"}},
+		{"explicit empty disables fallback", `{"nodes":["pve01"],"tls_allowed_server_names":[]}`, []string{}},
+		{"single name", `{"nodes":["pve01"],"tls_allowed_server_names":"pve02"}`, []string{"pve02"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var group InstanceGroup
+			require.NoError(t, json.Unmarshal([]byte(tc.data), &group))
+			require.Equal(t, tc.want, group.config().tlsServerNames())
+		})
+	}
+}
+
+func TestTLSAllowedServerNamesReplaceOnDecode(t *testing.T) {
+	var cfg pluginConfig
+	require.NoError(t, json.Unmarshal([]byte(`{"nodes":["pve01"],"tls_allowed_server_names":["pve02"]}`), &cfg))
+	require.NoError(t, json.Unmarshal([]byte(`{"tls_allowed_server_names":["pve03"]}`), &cfg))
+	require.Equal(t, []string{"pve03"}, cfg.tlsServerNames())
+	require.NoError(t, json.Unmarshal([]byte(`{"tls_allowed_server_names":[]}`), &cfg))
+	require.Empty(t, cfg.tlsServerNames())
+	require.NotNil(t, cfg.tlsServerNames())
+}
+
 func TestDefaultStateFileIsScopedToConfig(t *testing.T) {
 	t.Parallel()
 

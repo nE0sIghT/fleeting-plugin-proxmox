@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestClientAcceptsCertificateForConfiguredNode(t *testing.T) {
+func TestClientAcceptsCertificateForAllowedServerName(t *testing.T) {
 	cert, caFile := newTestServerCertificate(t, "pve01.example.test")
 	server := newTestTLSServer(t, cert)
 	defer server.Close()
@@ -41,7 +41,7 @@ func TestClientAcceptsCertificateForConfiguredNode(t *testing.T) {
 	require.Equal(t, "8.2", version.Release)
 }
 
-func TestClientStillRequiresTrustedCertificateForConfiguredNode(t *testing.T) {
+func TestClientStillRequiresTrustedCertificateForAllowedServerName(t *testing.T) {
 	cert, _ := newTestServerCertificate(t, "pve01.example.test")
 	server := newTestTLSServer(t, cert)
 	defer server.Close()
@@ -58,7 +58,7 @@ func TestClientStillRequiresTrustedCertificateForConfiguredNode(t *testing.T) {
 	require.ErrorContains(t, err, "certificate signed by unknown authority")
 }
 
-func TestClientRejectsCertificateOutsideAPIHostAndConfiguredNodes(t *testing.T) {
+func TestClientRejectsCertificateOutsideAPIHostAndAllowedServerNames(t *testing.T) {
 	cert, caFile := newTestServerCertificate(t, "pve01.example.test")
 	server := newTestTLSServer(t, cert)
 	defer server.Close()
@@ -73,7 +73,25 @@ func TestClientRejectsCertificateOutsideAPIHostAndConfiguredNodes(t *testing.T) 
 	require.NoError(t, err)
 
 	_, err = client.GetVersion(context.Background())
-	require.ErrorContains(t, err, "certificate is not valid for api_url host or configured nodes")
+	require.ErrorContains(t, err, "certificate is not valid for api_url host or configured server names")
+}
+
+func TestClientWithoutAllowedServerNamesRejectsOtherHost(t *testing.T) {
+	cert, caFile := newTestServerCertificate(t, "pve01.example.test")
+	server := newTestTLSServer(t, cert)
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, TLSCAFile: caFile})
+	require.NoError(t, err)
+	_, err = client.GetVersion(context.Background())
+	require.ErrorContains(t, err, "certificate")
+	require.ErrorContains(t, err, "127.0.0.1")
+}
+
+func TestTLSAllowedServerNamesIncludeAPIHost(t *testing.T) {
+	require.Equal(t, []string{"api.example.test", "pve01"}, tlsAllowedServerNames(
+		"api.example.test", []string{" pve01 ", "", "api.example.test", "pve01"},
+	))
 }
 
 func TestDecodeResponseIncludesProxmoxStatusMessage(t *testing.T) {

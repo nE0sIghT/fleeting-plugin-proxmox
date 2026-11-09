@@ -68,7 +68,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		TokenSecret:        g.TokenSecret,
 		TLSCAFile:          g.TLSCAFile,
 		InsecureSkipVerify: g.TLSInsecureSkipVerify,
-		AllowedServerNames: []string(g.Nodes),
+		AllowedServerNames: g.config().tlsServerNames(),
 	})
 	if err != nil {
 		return g.failInit(err)

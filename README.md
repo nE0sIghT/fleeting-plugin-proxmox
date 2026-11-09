@@ -72,6 +72,7 @@ Unless stated otherwise, the options below belong to `[runners.autoscaler.plugin
 | `token_id` | string | yes |  | Proxmox API token ID. |
 | `token_secret` | string | yes |  | Proxmox API token secret. |
 | `tls_ca_file` | string | no |  | Optional CA bundle used to verify the Proxmox TLS certificate. |
+| `tls_allowed_server_names` | string or list of strings | no | `nodes` when omitted | Additional certificate names accepted alongside the host in `api_url`. Independent of placement nodes when explicitly set. An empty list accepts only the `api_url` host. CA trust and certificate validity are still verified. |
 | `tls_insecure_skip_verify` | bool | no | `false` | Development only. |
 | `cluster_name` | string | no | `default` | Logical cluster identifier used in Fleeting provider IDs and default allocator state path. |
 | `pool` | string | yes |  | Dedicated Proxmox pool for managed VMs. |

@@ -41,6 +41,7 @@ type pluginConfig struct {
 	TokenID               string        `json:"token_id"`
 	TokenSecret           string        `json:"token_secret"`
 	TLSCAFile             string        `json:"tls_ca_file"`
+	TLSAllowedServerNames LaxStringList `json:"tls_allowed_server_names"`
 	TLSInsecureSkipVerify bool          `json:"tls_insecure_skip_verify"`
 	ClusterName           string        `json:"cluster_name"`
 	Pool                  string        `json:"pool"`
@@ -143,6 +144,10 @@ func (c *pluginConfig) UnmarshalJSON(data []byte) error {
 	}
 
 	decoded := rawPluginConfig(*c)
+	if _, ok := raw["tls_allowed_server_names"]; ok {
+		// Preserve an explicit empty list and replace previously decoded names.
+		decoded.TLSAllowedServerNames = make(LaxStringList, 0)
+	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
@@ -156,6 +161,13 @@ func (c *pluginConfig) UnmarshalJSON(data []byte) error {
 	}
 
 	return nil
+}
+
+func (c *pluginConfig) tlsServerNames() []string {
+	if c.TLSAllowedServerNames == nil {
+		return []string(c.Nodes)
+	}
+	return []string(c.TLSAllowedServerNames)
 }
 
 func (c *pluginConfig) applyDefaults(settings provider.Settings) {
