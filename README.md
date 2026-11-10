@@ -109,6 +109,7 @@ required; literal IP URLs bypass DNS caching.
 | `target_storages` | string or list | no |  | Datastore allowlist. |
 | `clone_snapshot` | string | no |  | Optional snapshot name used when cloning from the template. |
 | `vm_memory_mb` | int64 | no | template value | Optional memory override in MiB. |
+| `vm_min_memory_mb` | int64 | no | template value | Optional minimum RAM for ballooning in MiB (`balloon` in PVE). Omitted: leave the template setting unchanged. `0`: disable ballooning. Must not exceed the effective `vm_memory_mb` or inherited template memory. Scheduler allocation accounting still uses maximum RAM. |
 | `vm_cpu_cores` | int | no | template value | Optional vCPU override. |
 | `vm_disk_mb` | int64 | no | template value | Optional absolute primary disk size in MiB. Must not be smaller than the template disk. |
 | `vm_disk_device` | string | no | autodetect | Optional explicit disk device for `vm_disk_mb`, for example `scsi0`. |

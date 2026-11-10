@@ -115,6 +115,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 			TargetStorages:               g.TargetStorages,
 			CloneSnapshot:                g.CloneSnapshot,
 			VMMemoryMB:                   g.VMMemoryMB,
+			VMMinMemoryMB:                g.VMMinMemoryMB,
 			VMCPUCores:                   g.VMCPUCores,
 			VMDiskMB:                     g.VMDiskMB,
 			VMDiskDevice:                 g.VMDiskDevice,

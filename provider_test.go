@@ -40,6 +40,7 @@ type mockVM struct {
 	BootDisk    string
 	DiskDef     string
 	MemoryMB    int64
+	MinMemoryMB int64
 	CPUCores    int
 	DiskMB      int64
 }
@@ -305,18 +306,19 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 				return
 			}
 			m.vms[vmid] = mockVM{
-				Node:     r.PostForm.Get("target"),
-				VMID:     vmid,
-				Name:     r.PostForm.Get("name"),
-				Pool:     r.PostForm.Get("pool"),
-				Storage:  r.PostForm.Get("storage"),
-				Status:   "stopped",
-				DHCPIP:   fmt.Sprintf("10.10.30.%d", 100+(vmid%50)),
-				BootDisk: m.template.BootDisk,
-				DiskDef:  m.template.DiskDef,
-				MemoryMB: m.template.MemoryMB,
-				CPUCores: m.template.CPUCores,
-				DiskMB:   m.template.DiskMB,
+				Node:        r.PostForm.Get("target"),
+				VMID:        vmid,
+				Name:        r.PostForm.Get("name"),
+				Pool:        r.PostForm.Get("pool"),
+				Storage:     r.PostForm.Get("storage"),
+				Status:      "stopped",
+				DHCPIP:      fmt.Sprintf("10.10.30.%d", 100+(vmid%50)),
+				BootDisk:    m.template.BootDisk,
+				DiskDef:     m.template.DiskDef,
+				MemoryMB:    m.template.MemoryMB,
+				MinMemoryMB: m.template.MinMemoryMB,
+				CPUCores:    m.template.CPUCores,
+				DiskMB:      m.template.DiskMB,
 			}
 			m.taskNode["UPID:clone"] = "node1"
 			write("UPID:clone")
@@ -353,6 +355,11 @@ func (m *mockProxmox) handler(t *testing.T) http.Handler {
 				parsed, parseErr := strconv.ParseInt(value, 10, 64)
 				require.NoError(t, parseErr)
 				vm.MemoryMB = parsed
+			}
+			if value := r.PostForm.Get("balloon"); value != "" {
+				parsed, parseErr := strconv.ParseInt(value, 10, 64)
+				require.NoError(t, parseErr)
+				vm.MinMemoryMB = parsed
 			}
 			if value := r.PostForm.Get("cores"); value != "" {
 				parsed, parseErr := strconv.Atoi(value)
@@ -476,17 +483,22 @@ func TestProviderLifecycle(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name        string
-		networkMode string
-		wantIP      string
+		name            string
+		networkMode     string
+		wantIP          string
+		minMemoryMB     *int64
+		wantMinMemoryMB int64
 	}{
-		{name: "static", networkMode: "static", wantIP: "10.10.20.100"},
-		{name: "dhcp", networkMode: "dhcp", wantIP: "10.10.30.100"},
+		{name: "static", networkMode: "static", wantIP: "10.10.20.100", wantMinMemoryMB: 1024},
+		{name: "dhcp", networkMode: "dhcp", wantIP: "10.10.30.100", wantMinMemoryMB: 1024},
+		{name: "balloon minimum", networkMode: "dhcp", wantIP: "10.10.30.100", minMemoryMB: int64Ptr(2048), wantMinMemoryMB: 2048},
+		{name: "balloon disabled", networkMode: "dhcp", wantIP: "10.10.30.100", minMemoryMB: int64Ptr(0), wantMinMemoryMB: 0},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := newMockProxmox()
+			mock.template.MinMemoryMB = 1024
 			server := httptest.NewServer(mock.handler(t))
 			defer server.Close()
 
@@ -507,6 +519,7 @@ func TestProviderLifecycle(t *testing.T) {
 			group.CloneMode = "full"
 			group.TargetStorages = LaxStringList{"local-lvm", "ceph-vm"}
 			group.VMMemoryMB = 4096
+			group.VMMinMemoryMB = tc.minMemoryMB
 			group.VMCPUCores = 4
 			group.VMDiskMB = 20 * 1024
 			if tc.networkMode == "static" {
@@ -545,6 +558,7 @@ func TestProviderLifecycle(t *testing.T) {
 			vm := mock.snapshotVMs()[5000]
 			require.Equal(t, "ceph-vm", vm.Storage)
 			require.Equal(t, int64(4096), vm.MemoryMB)
+			require.Equal(t, tc.wantMinMemoryMB, vm.MinMemoryMB)
 			require.Equal(t, 4, vm.CPUCores)
 			require.Equal(t, int64(20*1024), vm.DiskMB)
 

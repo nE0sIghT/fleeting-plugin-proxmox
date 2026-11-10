@@ -38,6 +38,7 @@ check_interval = 3
     clone_mode = "full"
     target_storages = ["ceph-vm", "local-lvm"]
     vm_memory_mb = 4096
+    # vm_min_memory_mb = 2048
     vm_cpu_cores = 4
     vm_disk_mb = 40960
     max_parallel_clones = 2

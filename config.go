@@ -57,6 +57,7 @@ type pluginConfig struct {
 	TargetStorages LaxStringList `json:"target_storages"`
 	CloneSnapshot  string        `json:"clone_snapshot"`
 	VMMemoryMB     int64         `json:"vm_memory_mb"`
+	VMMinMemoryMB  *int64        `json:"vm_min_memory_mb"`
 	VMCPUCores     int           `json:"vm_cpu_cores"`
 	VMDiskMB       int64         `json:"vm_disk_mb"`
 	VMDiskDevice   string        `json:"vm_disk_device"`
@@ -274,6 +275,13 @@ func (c *pluginConfig) validate(settings provider.Settings) error {
 	}
 	if c.VMMemoryMB < 0 {
 		errs = append(errs, fmt.Errorf("vm_memory_mb must be >= 0"))
+	}
+	if c.VMMinMemoryMB != nil {
+		if *c.VMMinMemoryMB < 0 {
+			errs = append(errs, fmt.Errorf("vm_min_memory_mb must be >= 0"))
+		} else if c.VMMemoryMB > 0 && *c.VMMinMemoryMB > c.VMMemoryMB {
+			errs = append(errs, fmt.Errorf("vm_min_memory_mb must not exceed vm_memory_mb"))
+		}
 	}
 	if c.VMCPUCores < 0 {
 		errs = append(errs, fmt.Errorf("vm_cpu_cores must be >= 0"))

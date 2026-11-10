@@ -393,6 +393,7 @@ type SetConfigRequest struct {
 	Description        string
 	IPConfig           string
 	MemoryMB           int64
+	MinMemoryMB        *int64
 	CPUCores           int
 	CIUser             string
 	SSHKeys            []string
@@ -587,6 +588,9 @@ func (c *Client) SetVMConfig(ctx context.Context, node string, vmid int, req Set
 	form.Set("description", req.Description)
 	if req.MemoryMB > 0 {
 		form.Set("memory", fmt.Sprintf("%d", req.MemoryMB))
+	}
+	if req.MinMemoryMB != nil {
+		form.Set("balloon", fmt.Sprintf("%d", *req.MinMemoryMB))
 	}
 	if req.CPUCores > 0 {
 		form.Set("cores", fmt.Sprintf("%d", req.CPUCores))

@@ -63,6 +63,32 @@ func TestQueuedProvisionDoesNotCloneOrRollbackAfterDrain(t *testing.T) {
 	require.Zero(t, requests.Load(), "a paused queued plan must neither clone nor rollback an existing VMID")
 }
 
+func TestFindTemplatesValidatesInheritedMemoryForBalloon(t *testing.T) {
+	below, above := int64(1024), int64(4096)
+	for _, tc := range []struct {
+		name      string
+		minimum   *int64
+		maximum   int64
+		wantError bool
+	}{
+		{"omitted", nil, 0, false},
+		{"disabled", new(int64), 0, false},
+		{"below template", &below, 0, false},
+		{"above template", &above, 0, true},
+		{"explicit maximum", &above, 8192, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			group := &Group{cfg: Config{TemplateVMIDs: []int{9000}, VMMinMemoryMB: tc.minimum, VMMemoryMB: tc.maximum}}
+			_, err := group.findTemplates([]proxmoxclient.ClusterResource{{Type: "qemu", VMID: 9000, Template: 1, MaxMem: 2048 * 1024 * 1024}})
+			if tc.wantError {
+				require.ErrorContains(t, err, "exceeds template 9000 memory of 2048 MiB")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestReservePlannedResourcesSpreadsAcrossNodes(t *testing.T) {
 	t.Parallel()
 

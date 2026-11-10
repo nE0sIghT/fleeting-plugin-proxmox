@@ -221,6 +221,35 @@ func TestMetricsIntervalMustBePositive(t *testing.T) {
 	require.ErrorContains(t, err, "metrics_interval must be > 0")
 }
 
+func TestVMMinMemoryConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+		want *int64
+		err  string
+	}{
+		{"omitted", `{}`, nil, ""},
+		{"disabled", `{"vm_min_memory_mb":0}`, int64Ptr(0), ""},
+		{"minimum", `{"vm_memory_mb":4096,"vm_min_memory_mb":2048}`, int64Ptr(2048), ""},
+		{"equal maximum", `{"vm_memory_mb":4096,"vm_min_memory_mb":4096}`, int64Ptr(4096), ""},
+		{"inherited maximum", `{"vm_min_memory_mb":2048}`, int64Ptr(2048), ""},
+		{"negative", `{"vm_min_memory_mb":-1}`, int64Ptr(-1), "vm_min_memory_mb must be >= 0"},
+		{"above maximum", `{"vm_memory_mb":1024,"vm_min_memory_mb":2048}`, int64Ptr(2048), "vm_min_memory_mb must not exceed vm_memory_mb"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validStaticConfig(t)
+			require.NoError(t, json.Unmarshal([]byte(tc.data), &cfg))
+			err := cfg.validate(provider.Settings{})
+			if tc.err != "" {
+				require.ErrorContains(t, err, tc.err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.want, cfg.VMMinMemoryMB)
+		})
+	}
+}
+
 func TestReserveValuesMustBeNonNegative(t *testing.T) {
 	t.Parallel()
 

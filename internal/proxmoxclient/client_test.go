@@ -94,6 +94,35 @@ func TestTLSAllowedServerNamesIncludeAPIHost(t *testing.T) {
 	))
 }
 
+func TestSetVMConfigBalloon(t *testing.T) {
+	minimum := int64(2048)
+	for _, tc := range []struct {
+		name string
+		min  *int64
+		want string
+	}{
+		{"omitted", nil, ""},
+		{"disabled", new(int64), "0"},
+		{"minimum", &minimum, "2048"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, r.ParseForm())
+				require.Equal(t, tc.min != nil, r.PostForm.Has("balloon"))
+				require.Equal(t, tc.want, r.PostForm.Get("balloon"))
+				require.Equal(t, "4096", r.PostForm.Get("memory"))
+				_, _ = w.Write([]byte(`{"data":"UPID:config"}`))
+			}))
+			defer server.Close()
+			client, err := New(Config{BaseURL: server.URL})
+			require.NoError(t, err)
+			defer client.Close()
+			_, err = client.SetVMConfig(context.Background(), "node1", 100, SetConfigRequest{MemoryMB: 4096, MinMemoryMB: tc.min})
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestDecodeResponseIncludesProxmoxStatusMessage(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: http.StatusInternalServerError,

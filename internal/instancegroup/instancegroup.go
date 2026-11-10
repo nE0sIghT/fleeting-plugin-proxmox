@@ -39,6 +39,7 @@ type Config struct {
 	TargetStorages               []string
 	CloneSnapshot                string
 	VMMemoryMB                   int64
+	VMMinMemoryMB                *int64
 	VMCPUCores                   int
 	VMDiskMB                     int64
 	VMDiskDevice                 string
@@ -1589,6 +1590,7 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 		Description:        description,
 		IPConfig:           ipConfig,
 		MemoryMB:           g.cfg.VMMemoryMB,
+		MinMemoryMB:        g.cfg.VMMinMemoryMB,
 		CPUCores:           g.cfg.VMCPUCores,
 		CIUser:             g.cfg.CIUser,
 		SSHKeys:            sshKeys,
@@ -2677,6 +2679,9 @@ func (g *Group) findTemplates(resources []proxmoxclient.ClusterResource) ([]prox
 		}
 		if resource.Template != 1 {
 			return nil, fmt.Errorf("template_vmid %d is not a template", vmid)
+		}
+		if g.cfg.VMMinMemoryMB != nil && g.cfg.VMMemoryMB == 0 && *g.cfg.VMMinMemoryMB > resource.MaxMem/(1024*1024) {
+			return nil, fmt.Errorf("vm_min_memory_mb=%d exceeds template %d memory of %d MiB", *g.cfg.VMMinMemoryMB, vmid, resource.MaxMem/(1024*1024))
 		}
 		templates = append(templates, resource)
 	}
