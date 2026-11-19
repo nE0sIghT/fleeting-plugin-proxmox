@@ -73,7 +73,9 @@ func IsRetryable(err error) bool {
 
 // Retry runs fn until it succeeds, returns a non-retryable error, or the policy budget /
 // ctx is exhausted, sleeping with exponentially increasing, fully-jittered backoff between
-// attempts. The last error is returned when the budget is exhausted.
+// attempts. The budget starts when the first attempt fails; each retry runs with a context
+// that expires with the budget, so an in-flight request cannot overrun it. The last
+// transient error is returned when the budget is exhausted.
 func Retry(ctx context.Context, policy RetryPolicy, fn func(ctx context.Context) error) error {
 	err := fn(ctx)
 	if err == nil || !IsRetryable(err) || policy.MaxElapsed <= 0 {
@@ -111,7 +113,16 @@ func Retry(ctx context.Context, policy RetryPolicy, fn func(ctx context.Context)
 		case <-timer.C:
 		}
 
-		err = fn(ctx)
+		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
+		attemptErr := fn(attemptCtx)
+		budgetExpired := attemptCtx.Err() != nil && ctx.Err() == nil
+		cancel()
+		if attemptErr != nil && budgetExpired {
+			// The attempt was cut off by the budget rather than failing on its own;
+			// the previous transient error says more about why we were retrying.
+			return err
+		}
+		err = attemptErr
 		if err == nil || !IsRetryable(err) {
 			return err
 		}

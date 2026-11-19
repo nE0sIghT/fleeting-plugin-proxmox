@@ -212,3 +212,35 @@ func TestWaitForTaskStopsOnTerminalError(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, int64(1), atomic.LoadInt64(count), "a 4xx poll response is terminal")
 }
+
+func TestRetryCancelsInFlightAttemptWhenBudgetExpires(t *testing.T) {
+	transient := &APIError{StatusCode: 503}
+	var calls int
+	start := time.Now()
+	err := Retry(context.Background(), RetryPolicy{MaxElapsed: 50 * time.Millisecond, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}, func(ctx context.Context) error {
+		calls++
+		if calls == 1 {
+			return transient
+		}
+		// Simulate a hung request: only the attempt context can end it.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			return errors.New("attempt was not canceled at the budget deadline")
+		}
+	})
+
+	require.Less(t, time.Since(start), time.Second, "in-flight attempt must be canceled when the budget expires")
+	require.Equal(t, 2, calls)
+	require.Same(t, transient, err, "the last transient error is reported, not the budget cancellation")
+}
+
+func TestRetryFirstAttemptIsNotBoundedByBudget(t *testing.T) {
+	err := Retry(context.Background(), RetryPolicy{MaxElapsed: time.Millisecond}, func(ctx context.Context) error {
+		_, hasDeadline := ctx.Deadline()
+		require.False(t, hasDeadline, "the retry budget starts after the first failure")
+		return nil
+	})
+	require.NoError(t, err)
+}
