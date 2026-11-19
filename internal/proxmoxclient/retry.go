@@ -2,6 +2,8 @@ package proxmoxclient
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"math/rand"
@@ -36,7 +38,8 @@ func NewRetryPolicy(maxElapsed time.Duration) RetryPolicy {
 
 // IsRetryable reports whether err is a transient failure worth retrying on an idempotent
 // operation: network/DNS blips, connection resets, truncated responses, and 5xx/429
-// server responses. Context cancellation, ErrNotFound, and 4xx responses are terminal.
+// server responses. Context cancellation, ErrNotFound, 4xx responses, and TLS/certificate
+// failures are terminal.
 func IsRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -60,6 +63,13 @@ func IsRetryable(err error) bool {
 		return true
 	}
 
+	// TLS and certificate failures are configuration problems (wrong CA, wrong host,
+	// plain HTTP on the API port) that retrying cannot fix. They must be checked before
+	// net.Error, because http.Client wraps them in *url.Error, which satisfies it.
+	if isTLSConfigError(err) {
+		return false
+	}
+
 	// net.Error covers *url.Error, *net.OpError and *net.DNSError, which all satisfy the
 	// interface (they expose Timeout/Temporary), so DNS resolution failures and dial/read
 	// timeouts are caught here.
@@ -69,6 +79,19 @@ func IsRetryable(err error) bool {
 	}
 
 	return false
+}
+
+func isTLSConfigError(err error) bool {
+	var certErr *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var invalidCert x509.CertificateInvalidError
+	var hostnameErr x509.HostnameError
+	var recordHeaderErr tls.RecordHeaderError
+	return errors.As(err, &certErr) ||
+		errors.As(err, &unknownAuthority) ||
+		errors.As(err, &invalidCert) ||
+		errors.As(err, &hostnameErr) ||
+		errors.As(err, &recordHeaderErr)
 }
 
 // Retry runs fn until it succeeds, returns a non-retryable error, or the policy budget /

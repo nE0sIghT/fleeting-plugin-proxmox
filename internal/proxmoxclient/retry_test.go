@@ -2,9 +2,12 @@ package proxmoxclient
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +42,11 @@ func TestIsRetryable(t *testing.T) {
 		{"dns timeout", &net.DNSError{Err: "i/o timeout", Name: "pve2.example.test", IsTimeout: true}, true},
 		{"url wrapped op error", &url.Error{Op: "Get", URL: "https://pve2", Err: &net.OpError{Op: "dial", Err: errors.New("boom")}}, true},
 		{"opaque error", errors.New("boom"), false},
+		{"tls verification", &url.Error{Op: "Get", URL: "https://pve", Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}}, false},
+		{"x509 unknown authority", &url.Error{Op: "Get", URL: "https://pve", Err: x509.UnknownAuthorityError{}}, false},
+		{"x509 hostname", &url.Error{Op: "Get", URL: "https://pve", Err: x509.HostnameError{Host: "pve"}}, false},
+		{"x509 invalid", &url.Error{Op: "Get", URL: "https://pve", Err: x509.CertificateInvalidError{Reason: x509.Expired}}, false},
+		{"tls record header", &url.Error{Op: "Get", URL: "https://pve", Err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}}, false},
 	}
 
 	for _, tc := range cases {
@@ -243,4 +251,45 @@ func TestRetryFirstAttemptIsNotBoundedByBudget(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+func TestGetDoesNotRetryUntrustedCertificate(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		allowedServerNames []string
+	}{
+		{"standard verification", nil},
+		{"server name allowlist verification", []string{"node1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var handshakes int64
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("request must not reach the handler with an untrusted certificate")
+			}))
+			server.Config.ErrorLog = log.New(io.Discard, "", 0)
+			server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+				if state == http.StateNew {
+					atomic.AddInt64(&handshakes, 1)
+				}
+			}
+			server.StartTLS()
+			t.Cleanup(server.Close)
+
+			// No CA configured: the httptest certificate is not trusted.
+			client, err := New(Config{
+				BaseURL:            server.URL,
+				TokenID:            "user@pam!token",
+				TokenSecret:        "secret",
+				AllowedServerNames: tc.allowedServerNames,
+				RetryMaxElapsed:    time.Second,
+			})
+			require.NoError(t, err)
+
+			err = client.get(context.Background(), "/version", nil)
+
+			var certErr *tls.CertificateVerificationError
+			require.ErrorAs(t, err, &certErr)
+			require.Equal(t, int64(1), atomic.LoadInt64(&handshakes), "certificate errors must not be retried")
+		})
+	}
 }

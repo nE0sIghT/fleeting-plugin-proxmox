@@ -490,9 +490,19 @@ func tlsAllowedServerNames(apiHost string, serverNames []string) []string {
 	return names
 }
 
+// verifyTLSConnection verifies the server chain and accepts any of allowedNames. Failures
+// are reported as *tls.CertificateVerificationError, like the standard verifier's, so
+// IsRetryable treats them as terminal on both verification paths.
 func verifyTLSConnection(state tls.ConnectionState, roots *x509.CertPool, allowedNames []string) error {
+	if err := verifyTLSPeer(state, roots, allowedNames); err != nil {
+		return &tls.CertificateVerificationError{UnverifiedCertificates: state.PeerCertificates, Err: err}
+	}
+	return nil
+}
+
+func verifyTLSPeer(state tls.ConnectionState, roots *x509.CertPool, allowedNames []string) error {
 	if len(state.PeerCertificates) == 0 {
-		return errors.New("tls: server did not provide a certificate")
+		return errors.New("server did not provide a certificate")
 	}
 
 	leaf := state.PeerCertificates[0]
@@ -515,7 +525,7 @@ func verifyTLSConnection(state tls.ConnectionState, roots *x509.CertPool, allowe
 			return nil
 		}
 	}
-	return fmt.Errorf("tls: certificate is not valid for api_url host or configured server names: allowed names %s", strings.Join(allowedNames, ", "))
+	return fmt.Errorf("certificate is not valid for api_url host or configured server names: allowed names %s", strings.Join(allowedNames, ", "))
 }
 
 func (c *Client) GetVersion(ctx context.Context) (Version, error) {
