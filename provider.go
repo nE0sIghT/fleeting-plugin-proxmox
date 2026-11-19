@@ -387,15 +387,16 @@ func isWinRM(p provider.Protocol) bool {
 	return p == provider.ProtocolWinRM || p == provider.ProtocolWinRMHttps
 }
 
+// prepareWinRMCredentials returns the password cloud-init sets on the guest. When password is confugured manually, same password is returned. If password is not set, random password is generated and returned
 func (g *InstanceGroup) prepareWinRMCredentials() (string, error) {
-	password, err := generatePassword()
-	if err != nil {
-		return "", err
-	}
 	if g.settings.Password == "" {
+		password, err := generatePassword()
+		if err != nil {
+			return "", err
+		}
 		g.settings.Password = password
 	}
-	return password, nil
+	return g.settings.Password, nil
 }
 
 func generatePassword() (string, error) {

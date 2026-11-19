@@ -1714,3 +1714,24 @@ func extractVMID(path string) int {
 	}
 	panic(fmt.Sprintf("vmid not found in path %s", path))
 }
+
+func TestPrepareWinRMCredentialsUsesConfiguredPassword(t *testing.T) {
+	group := &InstanceGroup{}
+	group.settings.Password = "Configured.0aZ"
+
+	password, err := group.prepareWinRMCredentials()
+
+	require.NoError(t, err)
+	require.Equal(t, "Configured.0aZ", password)
+	require.Equal(t, "Configured.0aZ", group.settings.Password)
+}
+
+func TestPrepareWinRMCredentialsGeneratesPasswordWhenUnset(t *testing.T) {
+	group := &InstanceGroup{}
+
+	password, err := group.prepareWinRMCredentials()
+
+	require.NoError(t, err)
+	require.NotEmpty(t, password)
+	require.Equal(t, password, group.settings.Password, "ConnectInfo must hand out the password set on the guest")
+}
