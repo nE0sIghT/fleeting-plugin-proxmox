@@ -865,7 +865,15 @@ func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {
 			continue
 		}
 
-		state := mapState(resource.Status)
+		// /cluster/resources reports a suspended VM as "running", and fleeting observes
+		// suspend/resume transitions only through List, so running VMs need qmpstatus.
+		var qmpStatus string
+		if resource.Status == "running" {
+			if status, err := g.client.GetVMStatus(ctx, resource.Node, resource.VMID); err == nil {
+				qmpStatus = status.QMPStatus
+			}
+		}
+		state := mapState(resource.Status, qmpStatus)
 		id := instanceID(resource.Node, resource.VMID)
 		seen[id] = struct{}{}
 
@@ -986,7 +994,7 @@ func (g *Group) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
 		}
 		id := instanceID(resource.Node, resource.VMID)
 		seen[id] = true
-		state := mapState(resource.Status)
+		state := mapState(resource.Status, "")
 		if transient, ok := g.transient[id]; ok {
 			state = transient
 		}
@@ -1087,7 +1095,7 @@ func (g *Group) instanceStateCountsLocked(resources []proxmoxclient.ClusterResou
 
 		id := instanceID(resource.Node, resource.VMID)
 		seen[id] = struct{}{}
-		state := mapState(resource.Status)
+		state := mapState(resource.Status, "")
 		if transient, ok := g.transient[id]; ok {
 			state = transient
 		}
@@ -1409,7 +1417,7 @@ func (g *Group) Get(ctx context.Context, id string) (ManagedInstance, error) {
 		Node:  node,
 		VMID:  vmid,
 		Name:  resource.Name,
-		State: mapState(status.Status),
+		State: mapState(status.Status, status.QMPStatus),
 	}
 	if g.cfg.NetworkMode == "static" {
 		if ip, ok := parseStaticIPv4(config.IPConfig0); ok {
@@ -3042,14 +3050,19 @@ func (g *Group) clearNodeUnavailable(node string) {
 	})
 }
 
-func mapState(status string) provider.State {
+// mapState maps a Proxmox VM status to a fleeting state. Proxmox only reports "running"
+// or "stopped" in status; a suspended VM is still "running" there and is only visible via
+// qmpstatus ("paused" after a suspend, "suspended" after a guest-initiated S3 sleep, both
+// of which /status/resume brings back). qmpStatus may be empty when it is not known, for
+// example for /cluster/resources entries.
+func mapState(status, qmpStatus string) provider.State {
 	switch status {
 	case "running":
+		switch qmpStatus {
+		case "paused", "suspended":
+			return provider.StateSuspended
+		}
 		return provider.StateRunning
-	case "paused":
-		return provider.StateSuspended
-	case "stopped":
-		return provider.StateCreating
 	default:
 		return provider.StateCreating
 	}
