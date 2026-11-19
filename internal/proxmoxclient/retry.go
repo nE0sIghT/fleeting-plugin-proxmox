@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -98,7 +99,8 @@ func isTLSConfigError(err error) bool {
 // ctx is exhausted, sleeping with exponentially increasing, fully-jittered backoff between
 // attempts. The budget starts when the first attempt fails; each retry runs with a context
 // that expires with the budget, so an in-flight request cannot overrun it. The last
-// transient error is returned when the budget is exhausted.
+// transient error is returned when the budget is exhausted; ctx's error (wrapping the last
+// transient error's message) is returned when ctx ends first.
 func Retry(ctx context.Context, policy RetryPolicy, fn func(ctx context.Context) error) error {
 	err := fn(ctx)
 	if err == nil || !IsRetryable(err) || policy.MaxElapsed <= 0 {
@@ -114,7 +116,7 @@ func Retry(ctx context.Context, policy RetryPolicy, fn func(ctx context.Context)
 
 	for {
 		if ctx.Err() != nil {
-			return err
+			return contextError(ctx, err)
 		}
 
 		attemptDelay := next
@@ -132,7 +134,7 @@ func Retry(ctx context.Context, policy RetryPolicy, fn func(ctx context.Context)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return err
+			return contextError(ctx, err)
 		case <-timer.C:
 		}
 
@@ -155,4 +157,10 @@ func Retry(ctx context.Context, policy RetryPolicy, fn func(ctx context.Context)
 			next = policy.MaxDelay
 		}
 	}
+}
+
+// contextError reports that ctx ended while retrying, so callers can detect cancellation
+// with errors.Is, and keeps the last transient error in the message for diagnostics.
+func contextError(ctx context.Context, lastErr error) error {
+	return fmt.Errorf("%w (last error: %v)", ctx.Err(), lastErr)
 }

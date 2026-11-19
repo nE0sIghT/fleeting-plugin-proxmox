@@ -109,10 +109,24 @@ func TestRetryStopsOnContextCancellation(t *testing.T) {
 	err := Retry(ctx, RetryPolicy{MaxElapsed: time.Minute, BaseDelay: 20 * time.Millisecond, MaxDelay: 20 * time.Millisecond}, func(context.Context) error {
 		calls++
 		cancel()
+		return &APIError{StatusCode: 503, details: "service unavailable"}
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "service unavailable", "the last transient error is kept for diagnostics")
+	require.Equal(t, 1, calls)
+}
+
+func TestRetryReturnsContextErrorWhenCanceledDuringBackoff(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	var calls int
+	err := Retry(ctx, RetryPolicy{MaxElapsed: time.Minute, BaseDelay: time.Minute, MaxDelay: time.Minute}, func(context.Context) error {
+		calls++
 		return &APIError{StatusCode: 503}
 	})
-	require.Error(t, err)
-	require.Equal(t, 1, calls)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	var apiErr *APIError
+	require.False(t, errors.As(err, &apiErr), "a canceled retry must not look like an API error")
 }
 
 // jsonServer returns an httptest server whose handler is driven by fn, plus a pointer to the
