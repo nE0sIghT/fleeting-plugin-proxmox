@@ -869,9 +869,15 @@ func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {
 		// suspend/resume transitions only through List, so running VMs need qmpstatus.
 		var qmpStatus string
 		if resource.Status == "running" {
-			if status, err := g.client.GetVMStatus(ctx, resource.Node, resource.VMID); err == nil {
-				qmpStatus = status.QMPStatus
+			status, err := g.client.GetVMStatus(ctx, resource.Node, resource.VMID)
+			if err != nil {
+				if errors.Is(err, proxmoxclient.ErrNotFound) {
+					// Deleted between the cluster listing and the status call, keep calm, carry on
+					continue
+				}
+				return nil, fmt.Errorf("get status of %s/%d: %w", resource.Node, resource.VMID, err)
 			}
+			qmpStatus = status.QMPStatus
 		}
 		state := mapState(resource.Status, qmpStatus)
 		id := instanceID(resource.Node, resource.VMID)
@@ -892,8 +898,15 @@ func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {
 			State: state,
 		}
 
-		config, err := g.client.GetVMConfig(ctx, resource.Node, resource.VMID)
-		if err == nil && g.cfg.NetworkMode == "static" {
+		if g.cfg.NetworkMode == "static" {
+			config, found, err := g.lookupVMConfig(ctx, resource.Node, resource.VMID)
+			if err != nil {
+				return nil, fmt.Errorf("get config of %s/%d: %w", resource.Node, resource.VMID, err)
+			}
+			if !found {
+				// Deleted between the cluster listing and the config call.
+				continue
+			}
 			if ip, ok := parseStaticIPv4(config.IPConfig0); ok {
 				instance.IP = ip
 			}
