@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -57,9 +58,26 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		g.settings.Username = g.CIUser
 	}
 
-	publicKey, err := g.prepareSSHCredentials()
-	if err != nil {
-		return g.failInit(err)
+	var publicKey string
+	var ciPassword string
+	var err error
+
+	if isWinRM(g.settings.Protocol) {
+		ciPassword, err = g.prepareWinRMCredentials()
+		if err != nil {
+			return g.failInit(err)
+		}
+	} else {
+		publicKey, err = g.prepareSSHCredentials()
+		if err != nil {
+			return provider.ProviderInfo{}, err
+		}
+		if g.settings.OS == "windows" {
+			ciPassword, err = generatePassword()
+			if err != nil {
+				return g.failInit(err)
+			}
+		}
 	}
 
 	g.client, err = proxmoxclient.New(proxmoxclient.Config{
@@ -71,6 +89,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		AllowedServerNames: g.config().tlsServerNames(),
 		Info:               g.log.Info,
 		Warn:               g.log.Warn,
+		RetryMaxElapsed:    g.parsedAPIRetryMaxElapsed,
 	})
 	if err != nil {
 		return g.failInit(err)
@@ -134,7 +153,9 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 			AgentTimeout:                 g.parsedAgentTimeout,
 			AgentRequired:                g.AgentRequired,
 			GeneratedSSHPublicKey:        publicKey,
+			GeneratedPassword:            ciPassword,
 			StaticSSHPublicKeys:          g.CISSHKeys,
+			OS:                           g.settings.OS,
 			Scheduler:                    scheduler.New(g.Scheduler),
 			MemoryAllocationLimitPercent: g.NodeMemoryAllocationLimitPercent,
 			CPUAllocationLimitPercent:    g.NodeCPUAllocationLimitPercent,
@@ -171,10 +192,11 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	}
 
 	return provider.ProviderInfo{
-		ID:        groupID,
-		MaxSize:   g.parsedVMIDRange.Max - g.parsedVMIDRange.Min + 1,
-		Version:   Version.String(),
-		BuildInfo: Version.BuildInfo(),
+		ID:           groupID,
+		MaxSize:      g.parsedVMIDRange.Max - g.parsedVMIDRange.Min + 1,
+		Version:      Version.String(),
+		BuildInfo:    Version.BuildInfo(),
+		Capabilities: []provider.Capability{provider.CapabilitySuspendResume},
 	}, nil
 }
 
@@ -270,6 +292,7 @@ func (g *InstanceGroup) ConnectInfo(ctx context.Context, instance string) (provi
 		return provider.ConnectInfo{}, err
 	}
 	info.Key = g.settings.Key
+	info.Password = g.settings.Password
 	return info, nil
 }
 
@@ -279,6 +302,14 @@ func (g *InstanceGroup) Heartbeat(ctx context.Context, instance string) error {
 		g.reportRuntimeProblem("heartbeat_failed", "heartbeat", instance, err)
 	}
 	return err
+}
+
+func (g *InstanceGroup) Suspend(ctx context.Context, instances []string) ([]string, error) {
+	return g.group.Suspend(ctx, instances)
+}
+
+func (g *InstanceGroup) Resume(ctx context.Context, instances []string) ([]string, error) {
+	return g.group.Resume(ctx, instances)
 }
 
 func (g *InstanceGroup) Shutdown(ctx context.Context) error {
@@ -350,6 +381,33 @@ func publicKeyFromPrivate(privateKey []byte) (string, error) {
 		return "", fmt.Errorf("parse private key: %w", err)
 	}
 	return ensureSSHKeyComment(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))), nil
+}
+
+func isWinRM(p provider.Protocol) bool {
+	return p == provider.ProtocolWinRM || p == provider.ProtocolWinRMHttps
+}
+
+// prepareWinRMCredentials returns the password cloud-init sets on the guest. When password is confugured manually, same password is returned. If password is not set, random password is generated and returned
+func (g *InstanceGroup) prepareWinRMCredentials() (string, error) {
+	if g.settings.Password == "" {
+		password, err := generatePassword()
+		if err != nil {
+			return "", err
+		}
+		g.settings.Password = password
+	}
+	return g.settings.Password, nil
+}
+
+func generatePassword() (string, error) {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	// 6 bytes → 8 base64 chars (mixed case + digits).
+	// Suffix guarantees Windows password complexity (special, digit, lower, upper).
+	pass := base64.RawStdEncoding.EncodeToString(b) + ".0aZ"
+	return pass, nil
 }
 
 func ensureSSHKeyComment(publicKey string) string {

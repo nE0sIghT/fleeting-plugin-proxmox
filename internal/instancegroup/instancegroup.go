@@ -58,7 +58,9 @@ type Config struct {
 	AgentTimeout                 time.Duration
 	AgentRequired                bool
 	GeneratedSSHPublicKey        string
+	GeneratedPassword            string
 	StaticSSHPublicKeys          []string
+	OS                           string
 	Scheduler                    *scheduler.Scheduler
 	MemoryAllocationLimitPercent int
 	CPUAllocationLimitPercent    int
@@ -863,7 +865,21 @@ func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {
 			continue
 		}
 
-		state := mapState(resource.Status)
+		// /cluster/resources reports a suspended VM as "running", and fleeting observes
+		// suspend/resume transitions only through List, so running VMs need qmpstatus.
+		var qmpStatus string
+		if resource.Status == "running" {
+			status, err := g.client.GetVMStatus(ctx, resource.Node, resource.VMID)
+			if err != nil {
+				if errors.Is(err, proxmoxclient.ErrNotFound) {
+					// Deleted between the cluster listing and the status call, keep calm, carry on
+					continue
+				}
+				return nil, fmt.Errorf("get status of %s/%d: %w", resource.Node, resource.VMID, err)
+			}
+			qmpStatus = status.QMPStatus
+		}
+		state := mapState(resource.Status, qmpStatus)
 		id := instanceID(resource.Node, resource.VMID)
 		seen[id] = struct{}{}
 
@@ -882,8 +898,15 @@ func (g *Group) List(ctx context.Context) ([]ManagedInstance, error) {
 			State: state,
 		}
 
-		config, err := g.client.GetVMConfig(ctx, resource.Node, resource.VMID)
-		if err == nil && g.cfg.NetworkMode == "static" {
+		if g.cfg.NetworkMode == "static" {
+			config, found, err := g.lookupVMConfig(ctx, resource.Node, resource.VMID)
+			if err != nil {
+				return nil, fmt.Errorf("get config of %s/%d: %w", resource.Node, resource.VMID, err)
+			}
+			if !found {
+				// Deleted between the cluster listing and the config call.
+				continue
+			}
 			if ip, ok := parseStaticIPv4(config.IPConfig0); ok {
 				instance.IP = ip
 			}
@@ -984,7 +1007,7 @@ func (g *Group) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
 		}
 		id := instanceID(resource.Node, resource.VMID)
 		seen[id] = true
-		state := mapState(resource.Status)
+		state := mapState(resource.Status, "")
 		if transient, ok := g.transient[id]; ok {
 			state = transient
 		}
@@ -1085,7 +1108,7 @@ func (g *Group) instanceStateCountsLocked(resources []proxmoxclient.ClusterResou
 
 		id := instanceID(resource.Node, resource.VMID)
 		seen[id] = struct{}{}
-		state := mapState(resource.Status)
+		state := mapState(resource.Status, "")
 		if transient, ok := g.transient[id]; ok {
 			state = transient
 		}
@@ -1233,6 +1256,72 @@ func (g *Group) Decrease(ctx context.Context, ids []string) ([]string, error) {
 	return deleted, errors.Join(errs...)
 }
 
+func (g *Group) Suspend(ctx context.Context, ids []string) ([]string, error) {
+	var succeeded []string
+	var errs []error
+
+	for _, id := range ids {
+		node, vmid, err := parseInstanceID(id)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		g.setTransient(id, provider.StateSuspending)
+
+		upid, err := g.client.SuspendVM(ctx, node, vmid)
+		if err != nil {
+			g.clearTransient(id)
+			errs = append(errs, fmt.Errorf("suspend %s: %w", id, err))
+			continue
+		}
+
+		if err := g.client.WaitForTask(ctx, node, upid, g.cfg.TaskPollInterval); err != nil {
+			g.clearTransient(id)
+			errs = append(errs, fmt.Errorf("suspend %s: %w", id, err))
+			continue
+		}
+
+		g.clearTransient(id)
+		succeeded = append(succeeded, id)
+	}
+
+	return succeeded, errors.Join(errs...)
+}
+
+func (g *Group) Resume(ctx context.Context, ids []string) ([]string, error) {
+	var succeeded []string
+	var errs []error
+
+	for _, id := range ids {
+		node, vmid, err := parseInstanceID(id)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		g.setTransient(id, provider.StateResuming)
+
+		upid, err := g.client.ResumeVM(ctx, node, vmid)
+		if err != nil {
+			g.clearTransient(id)
+			errs = append(errs, fmt.Errorf("resume %s: %w", id, err))
+			continue
+		}
+
+		if err := g.client.WaitForTask(ctx, node, upid, g.cfg.TaskPollInterval); err != nil {
+			g.clearTransient(id)
+			errs = append(errs, fmt.Errorf("resume %s: %w", id, err))
+			continue
+		}
+
+		g.clearTransient(id)
+		succeeded = append(succeeded, id)
+	}
+
+	return succeeded, errors.Join(errs...)
+}
+
 func (g *Group) Shutdown(ctx context.Context) error {
 	if g.cancelRun != nil {
 		g.cancelRun()
@@ -1268,7 +1357,9 @@ func (g *Group) ConnectInfo(ctx context.Context, id string, settings provider.Se
 
 	info := provider.ConnectInfo{ConnectorConfig: settings.ConnectorConfig}
 	info.ID = id
-	info.OS = "linux"
+	if info.OS == "" {
+		info.OS = "linux"
+	}
 	if info.Arch == "" {
 		info.Arch = "amd64"
 	}
@@ -1276,7 +1367,7 @@ func (g *Group) ConnectInfo(ctx context.Context, id string, settings provider.Se
 		info.Protocol = provider.ProtocolSSH
 	}
 	if info.ProtocolPort == 0 {
-		info.ProtocolPort = provider.DefaultProtocolPorts[provider.ProtocolSSH]
+		info.ProtocolPort = provider.DefaultProtocolPorts[info.Protocol]
 	}
 	if info.Username == "" {
 		if g.cfg.CIUser != "" {
@@ -1339,7 +1430,7 @@ func (g *Group) Get(ctx context.Context, id string) (ManagedInstance, error) {
 		Node:  node,
 		VMID:  vmid,
 		Name:  resource.Name,
-		State: mapState(status.Status),
+		State: mapState(status.Status, status.QMPStatus),
 	}
 	if g.cfg.NetworkMode == "static" {
 		if ip, ok := parseStaticIPv4(config.IPConfig0); ok {
@@ -1498,9 +1589,16 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 	rollback := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), g.cfg.CloneTimeout)
 		defer cancel()
-		if err := g.safeDestroyProvisioningVM(cleanupCtx, plan.Node, plan.VMID, fmt.Sprintf("%s-%d", g.cfg.NamePrefix, plan.VMID)); err != nil {
-			log.Error("provisioning cleanup failed", "phase", "cleanup", "error", err)
-			g.reportPlanProblem(plan, "cleanup_failed", metrics.ProblemRecent, "cleanup", err, time.Time{})
+		// safeDestroyProvisioningVM is idempotent, so retry it through transient
+		// network/DNS blips: the outage that caused the failure often also blocks the
+		// cleanup that would otherwise strand the VM.
+		expectedName := fmt.Sprintf("%s-%d", g.cfg.NamePrefix, plan.VMID)
+		cleanupErr := proxmoxclient.Retry(cleanupCtx, proxmoxclient.NewRetryPolicy(g.cfg.CloneTimeout), func(ctx context.Context) error {
+			return g.safeDestroyProvisioningVM(ctx, plan.Node, plan.VMID, expectedName)
+		})
+		if cleanupErr != nil {
+			log.Error("provisioning cleanup failed", "phase", "cleanup", "error", cleanupErr)
+			g.reportPlanProblem(plan, "cleanup_failed", metrics.ProblemRecent, "cleanup", cleanupErr, time.Time{})
 		}
 		if g.pool != nil {
 			// Failed provisioning must not leave leases behind or put them into reuse cooldown.
@@ -1593,6 +1691,7 @@ func (g *Group) provisionOne(ctx context.Context, plan provisionPlan) (string, e
 		MinMemoryMB:        g.cfg.VMMinMemoryMB,
 		CPUCores:           g.cfg.VMCPUCores,
 		CIUser:             g.cfg.CIUser,
+		CIPassword:         g.cfg.GeneratedPassword,
 		SSHKeys:            sshKeys,
 		NameServer:         strings.Join(g.cfg.NameServers, " "),
 		SearchDomain:       g.cfg.SearchDomain,
@@ -2964,12 +3063,19 @@ func (g *Group) clearNodeUnavailable(node string) {
 	})
 }
 
-func mapState(status string) provider.State {
+// mapState maps a Proxmox VM status to a fleeting state. Proxmox only reports "running"
+// or "stopped" in status; a suspended VM is still "running" there and is only visible via
+// qmpstatus ("paused" after a suspend, "suspended" after a guest-initiated S3 sleep, both
+// of which /status/resume brings back). qmpStatus may be empty when it is not known, for
+// example for /cluster/resources entries.
+func mapState(status, qmpStatus string) provider.State {
 	switch status {
 	case "running":
+		switch qmpStatus {
+		case "paused", "suspended":
+			return provider.StateSuspended
+		}
 		return provider.StateRunning
-	case "stopped", "paused":
-		return provider.StateCreating
 	default:
 		return provider.StateCreating
 	}
